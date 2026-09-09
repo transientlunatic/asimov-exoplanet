@@ -164,7 +164,7 @@ duration_grid = {% if production.meta['bls'] and production.meta['bls']['duratio
 
 ## Phased roadmap
 
-- **Phase 0 — Scaffold** *(this PR)*: package skeleton, `asimov.pipelines` +
+- **Phase 0 — Scaffold** *(done)*: package skeleton, `asimov.pipelines` +
   `asimov.hooks.filesource` entry points in `pyproject.toml`, and a dummy
   pipeline (following the pattern of asimov core's
   `asimov/pipelines/testing` module — `SimpleTestPipeline` et al.) so the

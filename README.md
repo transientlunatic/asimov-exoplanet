@@ -10,10 +10,11 @@ See [`DESIGN.md`](DESIGN.md) for the full design and phased roadmap.
 
 ## Status
 
-This package is at the **Phase 0 (scaffold)** stage of the roadmap in
-`DESIGN.md`: the package skeleton, entry points, and a dummy pipeline exist
-so the Asimov plugin plumbing can be exercised end-to-end, but no real
-photometry ingestion, detrending, or transit search is implemented yet.
+This package has completed **Phase 1** of the roadmap in `DESIGN.md`: real
+MAST/`lightkurve` ingestion, detrending, and a Box Least Squares transit
+search are implemented and wired into `BLSTransitSearch`, with a worked
+blueprint at `examples/kepler-10.yaml`. Vetting and per-target/catalog
+reporting (Phase 2/3) are not yet implemented.
 
 ## Installation
 
@@ -21,18 +22,32 @@ photometry ingestion, detrending, or transit search is implemented yet.
 pip install -e ".[test]"
 ```
 
+The `photometry` extra (`astropy`, `lightkurve`, `astroquery`) is required
+for `BLSTransitSearch` and is pulled in automatically by `[test]`; the
+dependency-free `DummyTransitSearchPipeline` doesn't need it.
+
 ## Running the tests
 
 ```bash
 pytest
 ```
 
+## Trying it against a real target
+
+```bash
+asimov apply -f examples/kepler-10.yaml
+asimov manage build
+asimov manage submit
+```
+
 ## Package layout
 
 ```
 asimov_exoplanet/
-  pipeline.py            # BLSTransitSearch (Phase 1, stub) + DummyTransitSearchPipeline (Phase 0)
-  filesource.py          # MAST/Kepler asimov.hooks.filesource entry point (stub)
+  pipeline.py            # BLSTransitSearch + DummyTransitSearchPipeline - the asimov.pipelines entry points
+  filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
+  photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
+  cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
   config_template.toml   # liquid-templated pipeline config
-  report.py              # per-target + per-catalog reporting (stub)
+  report.py              # per-target + per-catalog reporting (Phase 2, stub)
 ```

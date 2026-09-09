@@ -1,0 +1,22 @@
+# A worked blueprint for Phase 1: a real Kepler target with a
+# well-characterised known transit (Kepler-10 b, period ~0.837 days),
+# useful as an end-to-end sanity check once you have MAST access.
+#
+# Apply with:
+#   asimov apply -f examples/kepler-10.yaml
+#
+# Note: as of asimov 0.7.0, `asimov apply` (asimov.cli.application.apply_page)
+# only recognises `kind: event` blueprints, even though the newer blueprint
+# schema in asimov.blueprints accepts "subject" as an alias for the same
+# object. Use `kind: event` until that alias is wired into `apply_page`.
+kind: event
+name: KIC-11904151
+photometry:
+  mission: Kepler
+  catalog id: 11904151
+---
+kind: analysis
+name: transit-search
+event: KIC-11904151
+pipeline: photometry-bls
+comment: BLS transit search on Kepler-10, recovering the known ~0.837-day Kepler-10 b transit

@@ -44,6 +44,8 @@ asimov_exoplanet/
   __init__.py
   pipeline.py            # BLSTransitSearch(Pipeline) - the asimov.pipelines entry point
   filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
+  photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
+  cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
   config_template.toml   # liquid-templated pipeline config
   report.py              # per-target + per-catalog reporting
 ```
@@ -96,10 +98,11 @@ as one job. The DAG/scheduler machinery starts mattering once a
 
 ## Blueprint examples
 
-A single-target `SimpleAnalysis`:
+A single-target `SimpleAnalysis` (see `examples/kepler-10.yaml` for a
+worked, verified-working version of this against a real Kepler target):
 
 ```yaml
-kind: subject
+kind: event
 name: KIC-11446443
 photometry:
   mission: Kepler
@@ -107,9 +110,19 @@ photometry:
 ---
 kind: analysis
 name: transit-search
+event: KIC-11446443
 pipeline: photometry-bls
 comment: BLS transit search on Kepler-10
 ```
+
+> **Note:** the original design used `kind: subject` for the first document.
+> As of asimov 0.7.0, `asimov apply` (`asimov.cli.application.apply_page`)
+> only recognises `kind: event` -- `subject` is accepted as an alias for the
+> same object by the newer schema in `asimov.blueprints`
+> (`select_blueprint_kind`), but that schema isn't wired into `apply_page`
+> yet. Use `event` until it is. Likewise, an analysis blueprint applied
+> without an explicit CLI `-e`/`--event` flag needs its target named via an
+> `event:` field, or `apply_page` will prompt for it interactively.
 
 A catalog-scale `ProjectAnalysis` (Phase 3):
 
@@ -133,26 +146,40 @@ catalog_id = {{ production.subject.meta['photometry']['catalog id'] }}
 mission = "{{ production.subject.meta['photometry']['mission'] }}"
 
 [detrend]
-window_length = {{ production.meta['detrend']['window length'] | default: 0.5 }}
+window_length = {% if production.meta['detrend'] and production.meta['detrend']['window length'] %}{{ production.meta['detrend']['window length'] }}{% else %}0.5{% endif %}
 
 [bls]
-period_min = {{ production.meta['bls']['period min'] | default: 0.5 }}
-period_max = {{ production.meta['bls']['period max'] | default: 20.0 }}
-duration_grid = {{ production.meta['bls']['duration grid'] | default: "[0.05, 0.10, 0.20]" }}
+period_min = {% if production.meta['bls'] and production.meta['bls']['period min'] %}{{ production.meta['bls']['period min'] }}{% else %}0.5{% endif %}
+period_max = {% if production.meta['bls'] and production.meta['bls']['period max'] %}{{ production.meta['bls']['period max'] }}{% else %}20.0{% endif %}
+duration_grid = {% if production.meta['bls'] and production.meta['bls']['duration grid'] %}{{ production.meta['bls']['duration grid'] }}{% else %}[0.05, 0.10, 0.20]{% endif %}
 ```
+
+> **Gotcha:** the `| default:` filter only substitutes a fallback for an
+> *undefined value* -- it doesn't protect against indexing into a completely
+> missing parent key. `production.meta['detrend']['window length'] | default: 0.5`
+> raises at render time if `detrend:` was never set at all (the common case
+> for a bare blueprint with no overrides), rather than falling back to 0.5.
+> Guard each optional section with an explicit `{% if %}` on the parent key
+> first, as above.
 
 ## Phased roadmap
 
-- **Phase 0 — Scaffold** *(this PR)*: package skeleton, `asimov.pipelines` +
+- **Phase 0 — Scaffold** *(done)*: package skeleton, `asimov.pipelines` +
   `asimov.hooks.filesource` entry points in `pyproject.toml`, and a dummy
   pipeline (following the pattern of asimov core's
   `asimov/pipelines/testing` module — `SimpleTestPipeline` et al.) so the
   entry-point plumbing can be verified end-to-end before any real astronomy
   code exists.
-- **Phase 1 — Single-target MVP**: real MAST/`lightkurve` ingestion,
-  detrending, BLS, `collect_assets`/`detect_completion`, a worked blueprint,
-  and unit tests against synthetic injected-transit light curves (no network
-  access needed in CI).
+- **Phase 1 — Single-target MVP** *(done)*: real MAST/`lightkurve` ingestion
+  (`filesource.py`), detrending and BLS (`photometry.py`), a real
+  `build_dag`/`submit_dag` (rendering `config_template.toml` via
+  `production.make_config` and running the `asimov-exoplanet-bls` console
+  script), `collect_assets`/`detect_completion`, a worked blueprint
+  (`examples/kepler-10.yaml`, verified end-to-end including a ledger
+  save/reload cycle), and unit tests against synthetic injected-transit
+  light curves (no network access needed in CI -- MAST/lightkurve calls are
+  mocked at the `lightkurve.search_lightcurve`/`MASTFileSource.fetch`
+  boundary). `vet()` remains a stub (Phase 2).
 - **Phase 2 — Vetting & reporting**: odd/even and secondary-eclipse checks,
   folded-light-curve plots, per-target report.
 - **Phase 3 — Catalog-scale campaigns**: `ProjectAnalysis` support,
@@ -183,12 +210,47 @@ These don't need to be resolved now, but are worth recording:
   should probably ship with this limitation clearly documented rather than
   wait for pixel-level vetting to be ready.
 
+## Pitfalls for anyone adding another pipeline (e.g. Phase 4's `transitleastsquares` backend)
+
+- **A pipeline's `name` class attribute must equal its registered
+  `asimov.pipelines` entry-point key (case-insensitively).**
+  `asimov.analysis.Analysis.to_dict()` serializes a production's pipeline as
+  `self.pipeline.name.lower()` -- not the entry-point key it was originally
+  constructed with -- and reconstructs it on reload via
+  `known_pipelines[pipeline.lower()]`. If the two don't match, saving and
+  reloading a ledger (i.e. separate `asimov apply` / `asimov manage build`
+  CLI invocations, or just quitting and restarting `asimov`) silently breaks
+  pipeline lookup for any analysis using it. `BLSTransitSearch.name` and
+  `DummyTransitSearchPipeline.name` are set to their entry-point keys
+  (`photometry-bls`, `photometry-bls-dummy`) for exactly this reason, rather
+  than to the class name -- see `tests/test_entry_points.py`'s
+  `test_pipeline_name_matches_its_own_entry_point_key` and
+  `tests/test_pipeline.py`'s `test_pipeline_survives_ledger_save_and_reload`
+  for the regression tests this discovery produced.
+
 ## Testing strategy
 
-Mirrors `asimov/pipelines/testing` in asimov core: unit tests build a
-pipeline instance against synthetic light curves with a known injected
-transit (fixed period/depth/duration), assert that BLS recovers it within
-tolerance, and exercise `build_dag`/`detect_completion`/`collect_assets`
-without network access or a real scheduler. End-to-end tests can later use a
-small, fixed real target (e.g. Kepler-10, whose transits are
-well-characterised) checked against published ground truth.
+Two layers, matching the pattern other Asimov pipeline plugins (e.g.
+`asimov-lalinference`) use:
+
+- **Unit tests** (`pytest`, run on every push/PR): mirror
+  `asimov/pipelines/testing` in asimov core. Build a pipeline instance
+  against synthetic light curves with a known injected transit (fixed
+  period/depth/duration), assert that BLS recovers it within tolerance, and
+  exercise `build_dag`/`detect_completion`/`collect_assets` without network
+  access or a real scheduler (MAST/lightkurve calls are mocked at the
+  `lightkurve.search_lightcurve`/`MASTFileSource.fetch` boundary).
+- **End-to-end test** (`.github/workflows/e2e.yml`, run on every push/PR): a
+  real HTCondor container (`htcondor/mini`), the real `photometry-bls`
+  pipeline, `asimov apply`/`asimov manage build submit`/`asimov monitor` as
+  a user actually would, against a real MAST target (Kepler-10,
+  `examples/kepler-10.yaml` — the same file documented as the worked
+  example, so this doubles as proof the example works). Asserts BLS
+  recovers Kepler-10 b's known ~0.8375-day period from the real downloaded
+  light curve, not just that a `results.json` file exists. Uses the shared
+  `etive-io/actions` composite actions (`setup-htcondor`,
+  `create-submit-user`, `run-asimov-command`, `wait-for-files`) that
+  `asimov-lalinference`'s own `e2e.yml` uses, plus a package-local
+  `setup-exoplanet-env` action (conda env + pip install, no conda-only
+  dependencies needed since `astropy`/`lightkurve`/`astroquery` are all pure
+  PyPI wheels).

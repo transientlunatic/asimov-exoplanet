@@ -1,0 +1,162 @@
+name: End-to-end test (real MAST/BLS pipeline)
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: "BLS transit-search end-to-end test (HTCondor)"
+    runs-on: ubuntu-latest
+    container:
+      image: htcondor/mini:latest
+      options: --privileged
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: etive-io/actions/setup-htcondor@v1
+
+      - name: Install base tools
+        run: |
+          yum install -y sudo git
+
+      - name: Create submit user
+        uses: etive-io/actions/create-submit-user@v1
+
+      - name: Ensure submituser can access workspace
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/e2e_project"
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      - name: Setup asimov-exoplanet Environment
+        uses: ./.github/actions/setup-exoplanet-env
+        with:
+          python-version: "3.11"
+
+      - name: Set up git
+        run: |
+          su - submituser <<SUBMITUSER
+          set -euo pipefail
+          git config --global init.defaultBranch master
+          git config --global user.email "you@example.com"
+          git config --global user.name "Your Name"
+          SUBMITUSER
+
+      - name: Create asimov project
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: cd e2e_project && asimov init "E2E Test Project"
+
+      - name: Configure condor user
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: cd e2e_project && asimov configuration update condor/user submituser
+
+      - name: Diagnose asimov.pipelines entry-point discovery as submituser
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            python3 -c "
+            from importlib.metadata import entry_points
+            eps = [ep for ep in entry_points(group='asimov.pipelines') if ep.value.startswith('asimov_exoplanet')]
+            print('Discovered asimov_exoplanet entry points:', eps)
+            for ep in eps:
+                try:
+                    ep.load()
+                    print(f'  {ep.name}: loaded OK')
+                except Exception as e:
+                    print(f'  {ep.name}: FAILED TO LOAD: {e!r}')
+            "
+
+      # examples/kepler-10.yaml is also the worked example in the README and
+      # DESIGN.md -- reusing it here (rather than a separate e2e-only
+      # fixture) means this test doubles as proof that the documented
+      # example actually works, not just something structurally similar
+      # to it.
+      - name: Apply the Kepler-10 blueprint (a real MAST target)
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            asimov apply -f "$GITHUB_WORKSPACE/examples/kepler-10.yaml"
+
+      - name: Build and submit the real BLS transit-search job
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: cd e2e_project && asimov manage build submit
+
+      - name: Inspect the generated job
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            find working/KIC-11904151/transit-search -maxdepth 1
+            echo "--- photometry-bls.toml ---"
+            cat working/KIC-11904151/transit-search/photometry-bls.toml
+
+      # This is the real completion criterion BLSTransitSearch.detect_completion()
+      # checks for, produced by a real run of the console script this
+      # pipeline's build_dag() wires up: a real MAST download (via
+      # lightkurve.search_lightcurve), a real detrend (astropy/lightkurve
+      # flatten), and a real astropy.timeseries.BoxLeastSquares search --
+      # not a mock or a stand-in pipeline.
+      - name: Wait for real BLS results
+        uses: etive-io/actions/wait-for-files@v1
+        with:
+          patterns: "results.json"
+          directory: "working/KIC-11904151/transit-search"
+          timeout: "600"
+          interval: "15"
+          working-directory: "e2e_project"
+
+      - name: Run asimov monitor
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: cd e2e_project && asimov monitor
+
+      # The scientifically meaningful assertion: Kepler-10 b is a real,
+      # well-characterised ultra-short-period rocky planet (period
+      # ~0.8375 d, e.g. Batalha et al. 2011 / the NASA Exoplanet Archive).
+      # Recovering it confirms the whole chain -- MAST ingestion, detrending,
+      # BLS -- actually works against real data, not just that a file
+      # called results.json exists.
+      - name: Verify BLS recovered Kepler-10 b's known ~0.8375-day period
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            python3 -c "
+            import json
+            with open('working/KIC-11904151/transit-search/results.json') as f:
+                results = json.load(f)
+            print('BLS results:', results)
+            known_period = 0.837495
+            diff = abs(results['period'] - known_period)
+            assert diff < 0.05, (
+                f\"Recovered period {results['period']} is not close to \"
+                f\"Kepler-10 b's known period {known_period} (diff={diff})\"
+            )
+            assert results['sde'] > 8.0, f\"SDE {results['sde']} is too low to call this a real detection\"
+            "
+
+      - name: Archive artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-debug
+          path: |
+            e2e_project/.asimov/
+            e2e_project/working/
+            e2e_project/checkouts/
+          retention-days: 5

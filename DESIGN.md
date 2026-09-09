@@ -195,6 +195,115 @@ duration_grid = {% if production.meta['bls'] and production.meta['bls']['duratio
 > Guard each optional section with an explicit `{% if %}` on the parent key
 > first, as above.
 
+## Bayesian signal characterization (Phase 5)
+
+### Prior art
+
+[BayesFlare](https://github.com/BayesFlare/bayesflare) (Pitkin, Williams,
+Fletcher & Grant 2014, [MNRAS 445, 2268](https://arxiv.org/abs/1406.1712))
+computed a Bayesian odds ratio between a flare-shaped template (Gaussian
+rise + exponential decay) and Gaussian noise for Kepler light curves, via a
+template grid scan with the signal amplitude marginalised analytically in
+closed form (`log_marg_amp`, a cross-correlation/matched-filter kernel).
+Its model library also included a `Transit` template (a flat-bottomed box
+with Gaussian ingress/egress wings) alongside `Flare` — the same
+odds-ratio machinery could in principle have compared flare, transit, and
+noise hypotheses for the same data, though nothing in the historical
+codebase wires that comparison up.
+
+The statistical idea generalises past Kepler and past flares specifically;
+what's dated is the implementation (Python 2.7/Cython/PyFITS, GPLv2,
+unmaintained since ~2015, amplitude-only marginalisation on a fixed
+template grid). `bilby`'s core library (`Likelihood`, `PriorDict`,
+nested-sampling `run_sampler`) is a general-purpose replacement for
+exactly this: define an arbitrary signal model, put priors on *all* its
+parameters rather than grid-searching most of them and marginalising only
+amplitude in closed form, and let nested sampling produce both full
+posteriors and the log-evidence that gives the odds ratio directly. This
+phase reuses the idea, not the code.
+
+### Not `bilby_pipe`
+
+`bilby_pipe` (which `asimov-bilby` drives for CBC PE) is not a generic
+"run bilby against arbitrary data" tool — its `Input`/`DataGenerationInput`
+classes, ini schema, and job-splitting logic are hard-wired to `bilby.gw`:
+interferometer strain data, `GravitationalWaveTransient` likelihoods,
+waveform approximants, calibration/ROQ options. There is no seam for a
+Gaussian-noise photometric time series with a flare/transit template —
+reusing it here would mean forking most of it, not extending it. The
+generic part of the stack is `bilby.core`; the config-generation/job
+role `bilby_pipe` plays for GW PE is instead played by this package's own
+pipeline class, the same relationship `asimov-bilby` already has with
+`bilby_pipe`.
+
+### A joint model, not separate flare/transit hypotheses
+
+A light curve can contain both a flare and a transit in the same stretch
+of data — a flare underlying a transit biases BLS's box-depth estimate,
+and neither `photometry.search()` nor a flare-only Bayesian pass catches
+that. Rather than testing "flare vs. noise" and "transit vs. noise" as
+separate, mutually exclusive hypotheses, the PE-stage likelihood should
+model the flux as a **sum of components** — one periodic transit
+component (informed by the search stage's ephemeris) plus zero or more
+flare components (informed by the search stage's flagged epochs) — and
+let `bilby` jointly fit amplitudes, timescales, and depth with the
+interaction between them properly marginalised. This is an improvement
+over both BayesFlare (flare-only) and the current BLS/`vet()` design (no
+flare-contamination handling at all).
+
+### Two-stage architecture: search proposes, PE fits
+
+Full nested-sampling PE over an entire multi-year, multi-flare light curve
+in one run is not tractable, and isn't how the equivalent GW workflow
+operates either — matched-filter search pipelines flag candidate times
+cheaply, and PE runs only against those. The same split applies here:
+
+1. **Search stage** — extends the existing `BLSTransitSearch`/
+   `photometry.search()`: a cheap pass over the full light curve that
+   proposes a *candidate list* rather than a single best period — a
+   transit ephemeris (if any) from BLS, and a list of flagged flare-like
+   epochs from a fast matched-filter/threshold pass (the modernised
+   analogue of BayesFlare's grid scan). Output: an extended
+   `results.json` carrying `{transit_candidate, flare_epochs: [...]}`.
+2. **PE stage** — a new pipeline (working name `photometry-bayes-pe`),
+   `needs: [transit-search]` in its blueprint, reading the search stage's
+   candidate list and constructing exactly one joint `bilby.core.Likelihood`
+   (transit component + one term per flagged flare epoch) with priors
+   seeded around the search stage's estimates. One `run_sampler` call per
+   star produces the odds ratio(s) — transit-vs-noise, and per-flare-epoch
+   flare-vs-nothing, read off the nested-sampling evidences — and full
+   posteriors on every component at once, properly accounting for their
+   overlap.
+
+### Ledger granularity: per star, not per candidate
+
+One asimov `Analysis` per identified flare/transit candidate doesn't match
+how the ledger is meant to scale (the same reasoning that motivates
+`ProjectAnalysis` above: the payoff is at catalog scale, over targets, not
+over per-target sub-events). An active flare star can produce dozens to
+hundreds of candidates over a Kepler/TESS baseline; at a catalog of
+thousands of targets, one ledger entry per candidate would run into the
+10⁵–10⁶ range, with real per-entry overhead (rundir, DAG, submission,
+monitoring). Instead:
+
+- One search `Analysis` per star (as now).
+- One PE `Analysis` per star, `needs: [search]`, whose single job
+  internally loops over the star's candidate list and fits the joint
+  model once — batched internally, not one ledger entry per candidate.
+- Only candidates clearing some significance/interest bar (e.g. a transit
+  candidate worth individual multi-sector vetting) get promoted to their
+  own tracked `event`/`Analysis` — mirroring how not every search trigger
+  in a GW catalog becomes a published event; most stay line items in a
+  results file, a few get individually followed up.
+- `SubjectAnalysis` (asimov core's aggregator over sibling analyses that
+  require more than one pipeline's results — the role `PESummary` plays
+  combining several `bilby` runs for one GW event) is the right mechanism
+  for later aggregating multiple *promoted* candidates' PE results into
+  one per-star report. It is not the right mechanism for the search stage
+  itself, which is a plain `SimpleAnalysis`/pipeline production, the same
+  as `BLSTransitSearch` already is — `SubjectAnalysis` resolves and
+  aggregates *existing* sibling analyses, it doesn't generate new ones.
+
 ## Phased roadmap
 
 - **Phase 0 — Scaffold** *(done)*: package skeleton, `asimov.pipelines` +
@@ -238,6 +347,15 @@ duration_grid = {% if production.meta['bls'] and production.meta['bls']['duratio
 - **Phase 4 — Stretch**: a pluggable transit-search backend
   (`transitleastsquares` as an alternative to BLS), multi-mission support
   (TESS, K2), pixel-level vetting using target pixel files.
+- **Phase 5 — Bayesian signal characterization**: see
+  [Bayesian signal characterization (Phase 5)](#bayesian-signal-characterization-phase-5)
+  above. Extend the search stage to emit a candidate list (transit
+  ephemeris + flagged flare epochs) instead of a single best period; add a
+  `photometry-bayes-pe` pipeline built on `bilby.core` that jointly fits a
+  transit-plus-flares model per star and reports odds ratios and
+  posteriors per component; use this as `vet()`'s primary signal, in place
+  of (or alongside) Phase 2's deterministic odd/even and secondary-eclipse
+  checks.
 
 ## Open questions
 
@@ -270,6 +388,28 @@ These don't need to be resolved now, but are worth recording:
   subject job has finished. Slurm job dependencies (`sbatch --dependency=afterok:<ids>`)
   could close this gap, but haven't been implemented -- catalog campaigns in
   this plugin have only been exercised against HTCondor so far.
+- **How the PE stage reads the search stage's output.** `needs:` gives
+  dependency ordering, but nothing in this package yet reads one
+  analysis's `collect_assets()`/results file to build another analysis's
+  config — that plumbing (and whether an equivalent pattern already exists
+  for other asimov pipelines, e.g. `PESummary` reading multiple `bilby`
+  results) needs checking before Phase 5's `photometry-bayes-pe` blueprint
+  can be written concretely.
+- **Promotion threshold.** What odds ratio or other criterion promotes a
+  candidate from "line item in a per-star results file" to "its own
+  tracked `event`/`Analysis`" needs a concrete definition, not just the
+  qualitative bar described above.
+- **Fixed vs. unknown component count.** Phase 5 assumes the search stage
+  hands the PE stage a fixed list of components to fit (a known transit
+  ephemeris, N flagged flare epochs) rather than doing trans-dimensional
+  inference over an unknown number of flares. Worth revisiting only if the
+  search stage's epoch-flagging turns out to be unreliable enough that
+  fixing the component count materially biases results.
+- **Nested-sampling cost at catalog scale.** Unlike BLS (seconds per
+  target), per-star `bilby` nested sampling is unbenchmarked here. Phase 5
+  should not be scoped further (e.g. default sampler settings, walltime
+  budgets for `ProjectAnalysis` fan-out) until that cost is measured
+  against a real multi-flare target.
 
 ## Pitfalls for anyone adding another pipeline (e.g. Phase 4's `transitleastsquares` backend)
 

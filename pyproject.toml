@@ -39,19 +39,27 @@ photometry = [
     "astropy",
     "lightkurve",
     "astroquery",
+    "tomli; python_version < '3.11'",
 ]
 test = [
     "pytest",
+    "asimov-exoplanet[photometry]",
 ]
 
 [project.urls]
 "Source code" = "https://github.com/transientlunatic/asimov-exoplanet"
+
+[project.scripts]
+asimov-exoplanet-bls = "asimov_exoplanet.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 packages = [
     "asimov_exoplanet",
 ]
+
+[tool.setuptools.package-data]
+asimov_exoplanet = ["config_template.toml"]
 
 [project.entry-points."asimov.pipelines"]
 photometry-bls = "asimov_exoplanet.pipeline:BLSTransitSearch"

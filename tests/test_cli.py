@@ -117,5 +117,47 @@ class CliRunTests(unittest.TestCase):
         mock_vet.assert_called_once_with(mock_detrend.return_value, mock_search.return_value)
 
 
+class CliAggregateTests(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _write_results(self, subject_name, **result):
+        subject_dir = os.path.join(self.test_dir, subject_name)
+        os.makedirs(subject_dir, exist_ok=True)
+        with open(os.path.join(subject_dir, "results.json"), "w") as f:
+            json.dump(result, f)
+
+    @patch("asimov_exoplanet.report.build_catalog_report")
+    def test_aggregate_scans_subject_subdirectories_and_writes_candidates_json(self, mock_build_report):
+        self._write_results("KIC-1", period=1.0, sde=10.0, vetting_flags=[])
+        self._write_results("KIC-2", period=2.0, sde=20.0, vetting_flags=["some flag"])
+        # A subdirectory with no results.json (e.g. a job that hasn't finished
+        # yet) must not break aggregation of the ones that have.
+        os.makedirs(os.path.join(self.test_dir, "KIC-3-pending"))
+
+        report_path = cli.aggregate(self.test_dir)
+
+        self.assertEqual(report_path, os.path.join(self.test_dir, "catalog_report.html"))
+
+        with open(os.path.join(self.test_dir, "candidates.json")) as f:
+            candidates = json.load(f)
+        self.assertEqual(set(candidates), {"KIC-1", "KIC-2"})
+        self.assertEqual(candidates["KIC-1"]["period"], 1.0)
+        self.assertEqual(candidates["KIC-2"]["vetting_flags"], ["some flag"])
+
+        mock_build_report.assert_called_once_with(candidates, report_path)
+
+    def test_aggregate_handles_no_completed_targets(self):
+        os.makedirs(os.path.join(self.test_dir, "KIC-1-pending"))
+
+        with patch("asimov_exoplanet.report.build_catalog_report") as mock_build_report:
+            cli.aggregate(self.test_dir)
+
+        mock_build_report.assert_called_once_with({}, os.path.join(self.test_dir, "catalog_report.html"))
+
+
 if __name__ == "__main__":
     unittest.main()

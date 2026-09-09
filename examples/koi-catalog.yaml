@@ -1,0 +1,43 @@
+# A worked blueprint for Phase 3: a small catalog-scale campaign
+# (ProjectAnalysis) re-running the BLS transit search across several real
+# Kepler targets with known, well-characterised transits.
+#
+# Apply with:
+#   asimov apply -f examples/koi-catalog.yaml
+#
+# Note: `kind: projectanalysis` has no underscore -- `apply_page`
+# (asimov.cli.application) matches blueprint kinds case-insensitively but
+# does not normalise underscores, so `kind: project_analysis` is silently a
+# no-op. Likewise `subjects:` must be an actual YAML list of subject names
+# already known to the ledger (each named by its own `kind: event`
+# blueprint below), not a path to a file listing them.
+kind: event
+name: KIC-11904151
+photometry:
+  mission: Kepler
+  catalog id: 11904151
+---
+kind: event
+name: KIC-6922244
+photometry:
+  mission: Kepler
+  catalog id: 6922244
+---
+kind: event
+name: KIC-10874614
+photometry:
+  mission: Kepler
+  catalog id: 10874614
+---
+kind: projectanalysis
+name: koi-catalog-rerun
+pipeline: photometry-bls
+subjects:
+  - KIC-11904151
+  - KIC-6922244
+  - KIC-10874614
+comment: >
+  Catalog-scale BLS re-run across Kepler-10, Kepler-8, and Kepler-6 --
+  recovering their known ~0.837, ~3.523, and ~3.235-day transits
+  respectively, as a worked multi-target sanity check for ProjectAnalysis
+  support.

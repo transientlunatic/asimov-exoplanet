@@ -1,10 +1,7 @@
 """
-Per-target reporting: a self-contained interactive HTML report for one
-BLS transit-search result.
-
-Phase 3 will add a catalog-scale aggregate report (a candidate table,
-completeness plots for injection-recovery studies) across many targets --
-not implemented here.
+Reporting: a self-contained interactive HTML report for one BLS
+transit-search result (``build_target_report``), and an aggregate
+candidate report across a catalog-scale campaign (``build_catalog_report``).
 """
 
 import json
@@ -109,6 +106,64 @@ def build_target_report(light_curve, search_result, vetting_result, output_path,
     # can't break out of the <script> tag it's embedded in.
     embedded_json = json.dumps(data).replace("</", "<\\/")
     html = _TEMPLATE.replace("__DATA_JSON__", embedded_json)
+
+    with open(output_path, "w") as f:
+        f.write(html)
+
+    return output_path
+
+
+def build_catalog_report(results_by_target, output_path):
+    """
+    Build an aggregate candidate report across a catalog-scale campaign.
+
+    Parameters
+    ----------
+    results_by_target : dict
+        Mapping of subject name to its ``results.json``-style dict (as
+        produced by ``asimov_exoplanet.cli.run``): ``period``, ``epoch``,
+        ``duration``, ``depth``, ``sde``, ``vetting_flags``.
+    output_path : str
+        Where to write the HTML report.
+
+    Returns
+    -------
+    str
+        ``output_path``, for convenience.
+
+    Notes
+    -----
+    This is a candidate table plus a simple period/depth population
+    overview -- deliberately not the "completeness plots for
+    injection-recovery studies" DESIGN.md also sketches for Phase 3. Those
+    need known injected truth values per target to compare recovered
+    parameters against, which this plugin doesn't track; left for a later
+    phase.
+    """
+    candidates = []
+    for name in sorted(results_by_target):
+        result = results_by_target[name]
+        candidates.append(
+            {
+                "name": name,
+                "period": result.get("period"),
+                "depth": result.get("depth"),
+                "sde": result.get("sde"),
+                "flags": result.get("vetting_flags", []),
+            }
+        )
+
+    data = {
+        "candidates": candidates,
+        "summary": {
+            "total": len(candidates),
+            "flagged": sum(1 for c in candidates if c["flags"]),
+        },
+    }
+
+    # See build_target_report for why "</" is escaped here.
+    embedded_json = json.dumps(data).replace("</", "<\\/")
+    html = _CATALOG_TEMPLATE.replace("__DATA_JSON__", embedded_json)
 
     with open(output_path, "w") as f:
         f.write(html)
@@ -323,6 +378,209 @@ primary.g.append("path")
   .attr("stroke-width", 2);
 
 scatterPlot("#secondary-plot", d => d.secondaryPhase, [-0.5, 0.5], "phase from secondary window (cycles)");
+</script>
+</body>
+</html>
+"""
+
+
+_CATALOG_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catalog transit-search report</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f7f8fa;
+    --border: #e2e5e9;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --warn: #dc2626;
+    --ok: #059669;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin: 0 0 24px; }
+  .layout { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { cursor: pointer; user-select: none; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  th:hover { color: var(--text); }
+  th.sorted::after { content: " \\25BE"; }
+  td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: #eef2ff; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .flag-badge {
+    display: inline-block;
+    background: #fef2f2;
+    color: var(--warn);
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+  .ok-badge {
+    display: inline-block;
+    background: #ecfdf5;
+    color: var(--ok);
+    border: 1px solid #a7f3d0;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+  .axis text { fill: var(--muted); font-size: 11px; }
+  .axis path, .axis line { stroke: var(--border); }
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--text);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .table-wrap { max-height: 520px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>Catalog transit-search report</h1>
+<p class="subtitle" id="subtitle"></p>
+<div class="layout">
+  <div class="panel" style="flex: 1; min-width: 420px;">
+    <h2>Candidates</h2>
+    <div class="table-wrap">
+      <table id="candidate-table">
+        <thead>
+          <tr>
+            <th data-key="name">Target</th>
+            <th data-key="period" class="numeric">Period (d)</th>
+            <th data-key="depth" class="numeric">Depth (ppm)</th>
+            <th data-key="sde" class="numeric">SDE</th>
+            <th data-key="flags">Vetting</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel" style="flex: 1; min-width: 420px;">
+    <h2>Period vs. SDE</h2>
+    <svg id="overview-plot"></svg>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script>
+const data = __DATA_JSON__;
+
+document.getElementById("subtitle").textContent =
+  data.summary.total + " target" + (data.summary.total === 1 ? "" : "s") +
+  ", " + data.summary.flagged + " flagged by vetting";
+
+function fmt(value, digits) {
+  return (value === null || value === undefined) ? "n/a" : value.toFixed(digits);
+}
+
+let sortKey = "sde";
+let sortDescending = true;
+
+function renderTable() {
+  const sorted = [...data.candidates].sort((a, b) => {
+    const av = a[sortKey], bv = b[sortKey];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    if (typeof av === "string") return sortDescending ? bv.localeCompare(av) : av.localeCompare(bv);
+    return sortDescending ? bv - av : av - bv;
+  });
+
+  d3.selectAll("#candidate-table th").classed("sorted", false);
+  d3.select(`#candidate-table th[data-key="${sortKey}"]`).classed("sorted", true);
+
+  const rows = d3.select("#candidate-table tbody")
+    .selectAll("tr")
+    .data(sorted, d => d.name)
+    .join("tr");
+
+  rows.html(d => `
+    <td><a href="${encodeURIComponent(d.name)}/folded_lightcurve.html">${d.name}</a></td>
+    <td class="numeric">${fmt(d.period, 5)}</td>
+    <td class="numeric">${d.depth === null || d.depth === undefined ? "n/a" : (d.depth * 1e6).toFixed(1)}</td>
+    <td class="numeric">${fmt(d.sde, 2)}</td>
+    <td>${d.flags.length === 0 ? '<span class="ok-badge">clean</span>' : `<span class="flag-badge" title="${d.flags.join('; ').replace(/"/g, '&quot;')}">${d.flags.length} flag${d.flags.length === 1 ? '' : 's'}</span>`}</td>
+  `);
+}
+
+d3.selectAll("#candidate-table th").on("click", function () {
+  const key = d3.select(this).attr("data-key");
+  if (key === sortKey) {
+    sortDescending = !sortDescending;
+  } else {
+    sortKey = key;
+    sortDescending = true;
+  }
+  renderTable();
+});
+
+renderTable();
+
+const tooltip = d3.select("#tooltip");
+const width = 480, height = 360;
+const margin = { top: 12, right: 16, bottom: 36, left: 48 };
+const innerWidth = width - margin.left - margin.right;
+const innerHeight = height - margin.top - margin.bottom;
+
+const svg = d3.select("#overview-plot")
+  .attr("viewBox", `0 0 ${width} ${height}`)
+  .attr("width", "100%")
+  .attr("height", height);
+const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+const plottable = data.candidates.filter(d => d.period !== null && d.sde !== null && d.sde !== undefined);
+const x = d3.scaleLog().domain(d3.extent(plottable, d => d.period)).nice().range([0, innerWidth]);
+const y = d3.scaleLinear().domain([0, d3.max(plottable, d => d.sde) || 1]).nice().range([innerHeight, 0]);
+
+g.append("g").attr("class", "axis").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x).ticks(5, "~g"));
+g.append("g").attr("class", "axis").call(d3.axisLeft(y).ticks(6));
+g.append("text").attr("x", innerWidth / 2).attr("y", innerHeight + 32).attr("text-anchor", "middle")
+  .attr("fill", "var(--muted)").attr("font-size", 11).text("period (d, log scale)");
+g.append("text").attr("transform", "rotate(-90)").attr("x", -innerHeight / 2).attr("y", -34)
+  .attr("text-anchor", "middle").attr("fill", "var(--muted)").attr("font-size", 11).text("SDE");
+
+g.selectAll("circle")
+  .data(plottable)
+  .join("circle")
+  .attr("cx", d => x(d.period))
+  .attr("cy", d => y(d.sde))
+  .attr("r", 4)
+  .attr("fill", d => d.flags.length === 0 ? "var(--accent)" : "var(--warn)")
+  .attr("opacity", 0.75)
+  .on("mouseover", (event, d) => {
+    tooltip.style("opacity", 1).html(`<strong>${d.name}</strong><br>period ${fmt(d.period, 4)} d<br>SDE ${fmt(d.sde, 2)}`);
+  })
+  .on("mousemove", (event) => {
+    tooltip.style("left", (event.pageX + 12) + "px").style("top", (event.pageY - 24) + "px");
+  })
+  .on("mouseout", () => tooltip.style("opacity", 0));
 </script>
 </body>
 </html>

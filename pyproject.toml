@@ -51,6 +51,7 @@ test = [
 
 [project.scripts]
 asimov-exoplanet-bls = "asimov_exoplanet.cli:main"
+asimov-exoplanet-bls-catalog-report = "asimov_exoplanet.cli:main_catalog_report"
 
 [tool.setuptools]
 include-package-data = true

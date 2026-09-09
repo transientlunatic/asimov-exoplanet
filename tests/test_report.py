@@ -140,5 +140,91 @@ class BuildTargetReportTests(unittest.TestCase):
         self.assertEqual(data["target"]["catalog_id"], malicious_target_info["catalog_id"])
 
 
+@unittest.skipUnless(REPORT_AVAILABLE, "astropy/lightkurve not installed")
+class BuildCatalogReportTests(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.output_path = os.path.join(self.test_dir, "catalog_report.html")
+        self.results_by_target = {
+            "KIC-2": {
+                "period": 2.5,
+                "epoch": 0.1,
+                "duration": 0.1,
+                "depth": 0.002,
+                "sde": 12.0,
+                "vetting_flags": ["odd/even transit depth mismatch (5.0 sigma)"],
+            },
+            "KIC-1": {
+                "period": 1.0,
+                "epoch": 0.0,
+                "duration": 0.05,
+                "depth": 0.001,
+                "sde": 20.0,
+                "vetting_flags": [],
+            },
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _embedded_data(self, html):
+        match = re.search(r"const data = (\{.*?\});", html, re.DOTALL)
+        self.assertIsNotNone(match, "could not find embedded data JSON in catalog report")
+        return json.loads(match.group(1))
+
+    def test_writes_html_file_with_embedded_candidates(self):
+        returned_path = report.build_catalog_report(self.results_by_target, self.output_path)
+
+        self.assertEqual(returned_path, self.output_path)
+        self.assertTrue(os.path.exists(self.output_path))
+
+        with open(self.output_path) as f:
+            html = f.read()
+
+        self.assertIn("<!doctype html>", html.lower())
+        self.assertIn("d3", html.lower())
+
+        data = self._embedded_data(html)
+        self.assertEqual(data["summary"]["total"], 2)
+        self.assertEqual(data["summary"]["flagged"], 1)
+
+        names = [c["name"] for c in data["candidates"]]
+        self.assertEqual(names, sorted(names))
+        self.assertEqual(set(names), {"KIC-1", "KIC-2"})
+
+        by_name = {c["name"]: c for c in data["candidates"]}
+        self.assertEqual(by_name["KIC-2"]["flags"], ["odd/even transit depth mismatch (5.0 sigma)"])
+        self.assertEqual(by_name["KIC-1"]["flags"], [])
+        self.assertEqual(by_name["KIC-1"]["period"], 1.0)
+        self.assertEqual(by_name["KIC-1"]["sde"], 20.0)
+
+    def test_handles_empty_catalog(self):
+        report.build_catalog_report({}, self.output_path)
+
+        with open(self.output_path) as f:
+            data = self._embedded_data(f.read())
+
+        self.assertEqual(data["candidates"], [])
+        self.assertEqual(data["summary"], {"total": 0, "flagged": 0})
+
+    def test_escapes_script_tag_breakout_in_target_name(self):
+        """
+        Same script-tag-breakout risk as ``build_target_report``: subject
+        names come from blueprint metadata, so a name (used as a dict key,
+        embedded verbatim in the JSON) containing ``</script>`` must not be
+        able to break out of the report's inline ``<script>`` tag.
+        """
+        malicious_results = {"</script><script>alert(1)</script>": {"period": 1.0, "vetting_flags": []}}
+
+        report.build_catalog_report(malicious_results, self.output_path)
+
+        with open(self.output_path) as f:
+            html = f.read()
+
+        self.assertNotIn("</script><script>alert", html)
+        data = self._embedded_data(html)
+        self.assertEqual(data["candidates"][0]["name"], "</script><script>alert(1)</script>")
+
+
 if __name__ == "__main__":
     unittest.main()

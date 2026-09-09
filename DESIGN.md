@@ -46,9 +46,9 @@ asimov_exoplanet/
   filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
   photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
   vetting.py             # odd/even + secondary-eclipse checks - plain functions, same pattern
-  cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
+  cli.py                 # asimov-exoplanet-bls / asimov-exoplanet-bls-catalog-report console scripts
   config_template.toml   # liquid-templated pipeline config
-  report.py              # per-target interactive HTML report (Phase 2); per-catalog reporting is Phase 3
+  report.py              # per-target (Phase 2) and per-catalog (Phase 3) interactive HTML reports
 ```
 
 ## MVP pipeline stages (Phase 1)
@@ -89,15 +89,28 @@ anything more sensitive (like `transitleastsquares`) is considered.
 `BLSTransitSearch` subclasses `asimov.pipeline.Pipeline`, registered under
 the name `photometry-bls`:
 
-- `build_dag(dryrun=False)` — write an executable script (or, for catalog
-  campaigns, one row of an HTCondor/Slurm DAG per subject) running
-  ingest → detrend → BLS → vet → report, writing `results.json` into
-  `self.production.rundir`.
+- `build_dag(dryrun=False)` — for a single-target `SimpleAnalysis`, write an
+  executable job script running ingest → detrend → BLS → vet → report,
+  writing `results.json` into `self.production.rundir`. For a catalog-scale
+  `ProjectAnalysis`, write one such job per subject into
+  `<rundir>/<subject name>/`, plus a final aggregation job (depending on
+  every subject job via an HTCondor DAGMan `PARENT`/`CHILD` line) that scans
+  all the per-subject `results.json` files and builds the campaign-wide
+  candidate report.
 - `submit_dag(dryrun=False)` — hand off to the configured scheduler
-  (`asimov.scheduler.Slurm` or HTCondor), same as other pipelines.
-- `detect_completion()` — `os.path.exists(os.path.join(self.production.rundir, "results.json"))`.
-- `collect_assets()` — returns
-  `{"results": .../results.json, "folded_lightcurve": .../folded_lightcurve.png}`.
+  (`asimov.scheduler.Slurm` or HTCondor). Under HTCondor this is a single
+  `condor_submit_dag` call in both cases; DAGMan itself enforces the
+  subject/aggregation dependency for a catalog campaign. Slurm has no
+  dependency-chaining support in this plugin (see "Open questions" below),
+  so for a catalog campaign each subject job is submitted independently and
+  the aggregation step is **not** automatically triggered.
+- `detect_completion()` — for a `SimpleAnalysis`,
+  `os.path.exists(os.path.join(self.production.rundir, "results.json"))`;
+  for a `ProjectAnalysis`, checks for `catalog_report.html` instead.
+- `collect_assets()` — for a `SimpleAnalysis`, returns
+  `{"results": .../results.json, "folded_lightcurve": .../folded_lightcurve.html}`;
+  for a `ProjectAnalysis`, returns
+  `{"catalog_report": .../catalog_report.html, "candidates": .../candidates.json}`.
 
 Each stage is fast and deterministic, so a single target can reasonably run
 as one job. The DAG/scheduler machinery starts mattering once a
@@ -131,15 +144,28 @@ comment: BLS transit search on Kepler-10
 > without an explicit CLI `-e`/`--event` flag needs its target named via an
 > `event:` field, or `apply_page` will prompt for it interactively.
 
-A catalog-scale `ProjectAnalysis` (Phase 3):
+A catalog-scale `ProjectAnalysis` (Phase 3; see `examples/koi-catalog.yaml` for
+a worked, verified-working version of this against real KIC targets):
 
 ```yaml
-kind: project_analysis
+kind: projectanalysis
 name: koi-catalog-rerun
 pipeline: photometry-bls
-subjects: koi-active-list.txt
-comment: Re-run BLS across all active KOIs with an updated detrending window
+subjects:
+  - KIC-11446443
+  - KIC-11913073
+comment: Re-run BLS across these KOIs with an updated detrending window
 ```
+
+> **Note:** the original design sketched `kind: project_analysis` and a bare
+> filename (`subjects: koi-active-list.txt`) for a list of targets. Neither
+> works: `apply_page` matches blueprint kinds case-insensitively but without
+> normalising underscores, so it only recognises `kind: projectanalysis` (no
+> underscore) -- `project_analysis` is silently a no-op (exit 0, ledger
+> unchanged). And `ProjectAnalysis.__init__` assigns `subjects:` directly to
+> `self._subjects` with no file-expansion logic, so it must be an actual YAML
+> list of subject names already known to the ledger (i.e. each named by a
+> prior `kind: event` blueprint), not a path to a file listing them.
 
 ## Configuration templating
 
@@ -197,10 +223,18 @@ duration_grid = {% if production.meta['bls'] and production.meta['bls']['duratio
   against synthetic light curves with injected eclipsing-binary-like
   signals in unit tests (`tests/test_vetting.py`). Per-quarter/sector
   consistency remains out of scope (see the roadmap item above).
-- **Phase 3 — Catalog-scale campaigns**: `ProjectAnalysis` support,
-  HTCondor/Slurm DAG generation for batch submission, an aggregate
-  report/dashboard (candidate table, completeness plots for
-  injection-recovery studies).
+- **Phase 3 — Catalog-scale campaigns** *(done)*: `ProjectAnalysis` support
+  (`BLSTransitSearch._build_catalog_dag`/`_submit_catalog_dag`), an HTCondor
+  DAG with one job per subject plus a dependent aggregation job, an
+  aggregate candidate report (`report.build_catalog_report`, D3-based: a
+  sortable candidate table linking to each target's own per-target report,
+  plus a period-vs-SDE overview plot), and a worked catalog blueprint
+  (`examples/koi-catalog.yaml`). Two deliberate scope cuts versus the
+  original sketch: (1) Slurm catalog submission does not chain the
+  aggregation job -- see "Open questions" below; (2) "completeness plots for
+  injection-recovery studies" are not implemented, since they need known
+  injected truth values per target that this plugin doesn't track -- left
+  for a later phase.
 - **Phase 4 — Stretch**: a pluggable transit-search backend
   (`transitleastsquares` as an alternative to BLS), multi-mission support
   (TESS, K2), pixel-level vetting using target pixel files.
@@ -226,6 +260,16 @@ These don't need to be resolved now, but are worth recording:
   gaps versus a production-grade vetting report (e.g. the Kepler Robovetter)
   -- worth reconsidering if this plugin is ever used for anything beyond a
   smoke-test-scale demonstration.
+- **Slurm catalog-campaign dependency chaining.** `asimov.scheduler.Slurm`
+  exposes a simple `.submit(script_path)` with no built-in support for
+  dependent job chains (unlike HTCondor DAGMan's native `PARENT`/`CHILD`).
+  For a catalog `ProjectAnalysis`, `_submit_catalog_dag` currently submits
+  every subject's job independently under Slurm and logs a warning that the
+  aggregation step needs a manual, later
+  `asimov-exoplanet-bls-catalog-report <rundir>` invocation once every
+  subject job has finished. Slurm job dependencies (`sbatch --dependency=afterok:<ids>`)
+  could close this gap, but haven't been implemented -- catalog campaigns in
+  this plugin have only been exercised against HTCondor so far.
 
 ## Pitfalls for anyone adding another pipeline (e.g. Phase 4's `transitleastsquares` backend)
 
@@ -276,3 +320,17 @@ Two layers, matching the pattern other Asimov pipeline plugins (e.g.
   `setup-exoplanet-env` action (conda env + pip install, no conda-only
   dependencies needed since `astropy`/`lightkurve`/`astroquery` are all pure
   PyPI wheels).
+
+  `e2e.yml` currently only exercises the single-target (`SimpleAnalysis`)
+  path via `examples/kepler-10.yaml`. `examples/koi-catalog.yaml`'s
+  `ProjectAnalysis` has been verified directly (real ledger apply + real
+  `BLSTransitSearch.build_dag()`, producing correct per-subject
+  directories, configs, and a DAG with the right `PARENT`/`CHILD`
+  aggregation dependency -- see `BLSTransitSearchCatalogDagTests` in
+  `tests/test_pipeline.py`), but not yet through the full
+  `asimov manage build submit`/`asimov monitor` CLI path the way the
+  single-target e2e test is. Asimov core's `manage.py` has separate,
+  more involved handling for `ledger.project_analyses` (interest-based
+  scheduling across repeated analyses) that this plugin's minimal
+  `ProjectAnalysis` usage doesn't exercise -- worth a dedicated e2e job in
+  a later pass, rather than folding into this phase's already-broad scope.

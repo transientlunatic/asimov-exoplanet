@@ -159,6 +159,17 @@ class BLSTransitSearchLifecycleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pipeline.ingest()
 
+    def test_ingest_requires_a_configured_rundir(self):
+        production = FakeProduction(
+            "no-rundir",
+            rundir=None,
+            subject_meta={"photometry": {"mission": "Kepler", "catalog id": 11446443}},
+        )
+        pipeline = BLSTransitSearch(production)
+
+        with self.assertRaises(ValueError):
+            pipeline.ingest()
+
     @patch("lightkurve.read")
     @patch("asimov_exoplanet.filesource.MASTFileSource")
     def test_ingest_fetches_and_caches_light_curve(self, mock_filesource_cls, mock_lk_read):

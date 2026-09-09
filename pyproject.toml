@@ -32,6 +32,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "asimov",
+    "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +40,6 @@ photometry = [
     "astropy",
     "lightkurve",
     "astroquery",
-    "tomli; python_version < '3.11'",
 ]
 test = [
     "pytest",

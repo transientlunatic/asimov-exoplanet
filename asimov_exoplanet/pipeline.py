@@ -25,6 +25,7 @@ This module provides two pipelines, both registered under the
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -54,8 +55,8 @@ def _write_submission_files(rundir, job_script, sub_filename, dag_filename, job_
     submit_file = os.path.join(rundir, sub_filename)
     with open(submit_file, "w") as f:
         f.write("universe = vanilla\n")
-        f.write(f"executable = {job_script}\n")
-        f.write(f"initialdir = {rundir}\n")
+        f.write(f'executable = "{job_script}"\n')
+        f.write(f'initialdir = "{rundir}"\n')
         f.write("output = job.out\n")
         f.write("error = job.err\n")
         f.write("log = job.log\n")
@@ -74,7 +75,7 @@ def _write_submission_files(rundir, job_script, sub_filename, dag_filename, job_
         f.write(f"#SBATCH --error={rundir}/slurm_%j.err\n")
         f.write("#SBATCH --ntasks=1\n")
         f.write("#SBATCH --time=00:10:00\n")
-        f.write(f"\nbash {job_script}\n")
+        f.write(f"\nbash {shlex.quote(job_script)}\n")
     os.chmod(sbatch_file, 0o755)
 
 
@@ -252,7 +253,7 @@ class BLSTransitSearch(Pipeline):
     --------
     .. code-block:: yaml
 
-        kind: subject
+        kind: event
         name: KIC-11446443
         photometry:
           mission: Kepler
@@ -260,8 +261,13 @@ class BLSTransitSearch(Pipeline):
         ---
         kind: analysis
         name: transit-search
+        event: KIC-11446443
         pipeline: photometry-bls
         comment: BLS transit search on Kepler-10
+
+    (See ``examples/kepler-10.yaml`` for a verified-working version of this
+    against a real target, and the note in ``DESIGN.md`` on why ``event``
+    is used here rather than ``subject``.)
     """
 
     #: Must match the registered ``asimov.pipelines`` entry-point key
@@ -305,7 +311,11 @@ class BLSTransitSearch(Pipeline):
             )
         mission = photometry_meta.get("mission", "Kepler")
 
-        _ensure_rundir(self.production.rundir)
+        if not _ensure_rundir(self.production.rundir):
+            raise ValueError(
+                f"Analysis {self.production.name!r} has no run directory configured; "
+                "cannot cache the ingested light curve."
+            )
         client = MASTFileSource(asimov_config)
         fits_bytes = client.fetch(catalog_id, mission=mission)
 
@@ -367,7 +377,7 @@ class BLSTransitSearch(Pipeline):
             f.write("# BLS transit-search pipeline job\n")
             f.write("set -e\n")
             f.write(f"echo 'Working directory: {rundir}'\n")
-            f.write(f"asimov-exoplanet-bls {config_path} {rundir}\n")
+            f.write(f"asimov-exoplanet-bls {shlex.quote(config_path)} {shlex.quote(rundir)}\n")
             f.write(f"echo 'Transit search complete - {os.path.join(rundir, 'results.json')} created'\n")
         os.chmod(job_script, 0o755)
 

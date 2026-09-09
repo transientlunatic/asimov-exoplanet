@@ -45,9 +45,10 @@ asimov_exoplanet/
   pipeline.py            # BLSTransitSearch(Pipeline) - the asimov.pipelines entry point
   filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
   photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
+  vetting.py             # odd/even + secondary-eclipse checks - plain functions, same pattern
   cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
   config_template.toml   # liquid-templated pipeline config
-  report.py              # per-target + per-catalog reporting
+  report.py              # per-target interactive HTML report (Phase 2); per-catalog reporting is Phase 3
 ```
 
 ## MVP pipeline stages (Phase 1)
@@ -69,12 +70,18 @@ anything more sensitive (like `transitleastsquares`) is considered.
 3. **Transit search** — run BLS over a period grid; record the best period,
    epoch, duration, depth, and a significance statistic (SDE or equivalent).
 4. **Vet** — cheap, deterministic checks only for the MVP: odd/even transit
-   depth consistency, a secondary-eclipse search at phase 0.5, and
-   per-quarter/sector consistency where available. This is **not** full
-   centroid/pixel-level vetting (which needs target pixel files, not just
-   light curves) — that's future work (Phase 4).
+   depth consistency (`vetting.check_odd_even`) and a secondary-eclipse
+   search at phase 0.5 (`vetting.check_secondary_eclipse`). Per-quarter/sector
+   consistency is **not** implemented -- it needs multiple quarters/sectors
+   of data, and `ingest()` currently fetches only the first
+   `lightkurve.search_lightcurve` result (see "Open questions"). This is
+   also **not** full centroid/pixel-level vetting (which needs target pixel
+   files, not just light curves) — that's future work (Phase 4).
 5. **Report** — a small machine-readable `results.json` (period, depth,
-   duration, SDE, vetting flags) plus a folded-light-curve plot, analogous to
+   duration, SDE, vetting flags) plus an interactive folded-light-curve
+   report (`report.build_target_report`): a self-contained HTML page with a
+   D3 phase-folded scatter plot (odd/even cycles coloured separately, the
+   BLS box model overlaid) and a secondary-eclipse zoom panel, analogous to
    `collect_assets` for GW pipelines.
 
 ## Pipeline class
@@ -180,8 +187,16 @@ duration_grid = {% if production.meta['bls'] and production.meta['bls']['duratio
   light curves (no network access needed in CI -- MAST/lightkurve calls are
   mocked at the `lightkurve.search_lightcurve`/`MASTFileSource.fetch`
   boundary). `vet()` remains a stub (Phase 2).
-- **Phase 2 — Vetting & reporting**: odd/even and secondary-eclipse checks,
-  folded-light-curve plots, per-target report.
+- **Phase 2 — Vetting & reporting** *(done)*: odd/even and secondary-eclipse
+  checks (`vetting.py`), wired into both `BLSTransitSearch.vet()` and the
+  `asimov-exoplanet-bls` console script (`cli.py`), so `results.json`'s
+  `vetting_flags` are now real; an interactive per-target HTML report
+  (`report.py`, D3-based) written alongside `results.json` and exposed via
+  `collect_assets()`. Verified against real Kepler-10 data in the e2e
+  workflow (no vetting flags raised for a genuine planet, as expected) and
+  against synthetic light curves with injected eclipsing-binary-like
+  signals in unit tests (`tests/test_vetting.py`). Per-quarter/sector
+  consistency remains out of scope (see the roadmap item above).
 - **Phase 3 — Catalog-scale campaigns**: `ProjectAnalysis` support,
   HTCondor/Slurm DAG generation for batch submission, an aggregate
   report/dashboard (candidate table, completeness plots for
@@ -203,12 +218,14 @@ These don't need to be resolved now, but are worth recording:
 - **Storage of downloaded FITS files.** Light curve FITS files should be
   treated as run-directory assets, not committed into any git-backed ledger
   repository — these can be large and numerous at catalog scale.
-- **Depth of vetting required before Phase 2 is "done".** The MVP's
-  deterministic checks (odd/even depth, secondary eclipse, per-sector
-  consistency) are not a substitute for full centroid/pixel-level vetting,
-  which needs target pixel files rather than just light curves. Phase 2
-  should probably ship with this limitation clearly documented rather than
-  wait for pixel-level vetting to be ready.
+- **Depth of vetting: resolved for Phase 2, revisit later.** Phase 2 shipped
+  with exactly two checks (odd/even depth, secondary eclipse) and explicitly
+  does not attempt per-sector consistency (needs `ingest()` to fetch and
+  stitch multiple quarters/sectors, which it doesn't) or centroid/pixel-level
+  vetting (needs target pixel files, not just light curves). Both remain real
+  gaps versus a production-grade vetting report (e.g. the Kepler Robovetter)
+  -- worth reconsidering if this plugin is ever used for anything beyond a
+  smoke-test-scale demonstration.
 
 ## Pitfalls for anyone adding another pipeline (e.g. Phase 4's `transitleastsquares` backend)
 
@@ -236,7 +253,10 @@ Two layers, matching the pattern other Asimov pipeline plugins (e.g.
 - **Unit tests** (`pytest`, run on every push/PR): mirror
   `asimov/pipelines/testing` in asimov core. Build a pipeline instance
   against synthetic light curves with a known injected transit (fixed
-  period/depth/duration), assert that BLS recovers it within tolerance, and
+  period/depth/duration), assert that BLS recovers it within tolerance,
+  assert the vetting checks pass on a clean signal and flag synthetic
+  eclipsing-binary-like signals (alternating odd/even depths, an injected
+  secondary eclipse), assert the HTML report embeds the right data, and
   exercise `build_dag`/`detect_completion`/`collect_assets` without network
   access or a real scheduler (MAST/lightkurve calls are mocked at the
   `lightkurve.search_lightcurve`/`MASTFileSource.fetch` boundary).
@@ -247,8 +267,10 @@ Two layers, matching the pattern other Asimov pipeline plugins (e.g.
   `examples/kepler-10.yaml` — the same file documented as the worked
   example, so this doubles as proof the example works). Asserts BLS
   recovers Kepler-10 b's known ~0.8375-day period from the real downloaded
-  light curve, not just that a `results.json` file exists. Uses the shared
-  `etive-io/actions` composite actions (`setup-htcondor`,
+  light curve (not just that a `results.json` file exists), that no
+  vetting flags are raised for this genuine planet, and that the HTML
+  report is well-formed and carries this run's actual data. Uses the
+  shared `etive-io/actions` composite actions (`setup-htcondor`,
   `create-submit-user`, `run-asimov-command`, `wait-for-files`) that
   `asimov-lalinference`'s own `e2e.yml` uses, plus a package-local
   `setup-exoplanet-env` action (conda env + pip install, no conda-only

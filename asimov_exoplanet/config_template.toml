@@ -1,0 +1,11 @@
+[target]
+catalog_id = {{ production.subject.meta['photometry']['catalog id'] }}
+mission = "{{ production.subject.meta['photometry']['mission'] }}"
+
+[detrend]
+window_length = {{ production.meta['detrend']['window length'] | default: 0.5 }}
+
+[bls]
+period_min = {{ production.meta['bls']['period min'] | default: 0.5 }}
+period_max = {{ production.meta['bls']['period max'] | default: 20.0 }}
+duration_grid = {{ production.meta['bls']['duration grid'] | default: "[0.05, 0.10, 0.20]" }}

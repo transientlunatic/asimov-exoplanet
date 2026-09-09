@@ -297,6 +297,41 @@ class BLSTransitSearchBuildDagTests(unittest.TestCase):
         self.assertIn("asimov-exoplanet-bls", script)
         self.assertIn(config_path, script)
 
+    def test_sub_file_does_not_quote_executable_or_initialdir(self):
+        """
+        Regression test: HTCondor's submit-file language takes
+        ``executable``/``initialdir`` as the literal remainder of the line --
+        it does not strip surrounding quotes the way a shell would. Wrapping
+        them in quotes (to "protect" against spaces, as a general-purpose
+        code reviewer might suggest) makes HTCondor look for a path with
+        literal quote characters in it, so the job never even reaches the
+        schedd's queue. This was caught by the real e2e workflow, not by
+        this unit test suite -- add the check here too so it can't
+        regress silently again.
+        """
+        from asimov.analysis import SimpleAnalysis
+
+        event = self.ledger.get_event("KIC-11446443")[0]
+        rundir = os.path.join(self.test_dir, "run")
+
+        analysis = SimpleAnalysis(
+            subject=event,
+            name="transit-search",
+            pipeline="photometry-bls",
+            status="ready",
+            ledger=self.ledger,
+            rundir=rundir,
+        )
+        analysis.pipeline.build_dag()
+
+        with open(os.path.join(rundir, "run_transit_search.sub")) as f:
+            sub_contents = f.read()
+
+        self.assertIn(f"executable = {rundir}/run_transit_search.sh", sub_contents)
+        self.assertIn(f"initialdir = {rundir}", sub_contents)
+        self.assertNotIn('executable = "', sub_contents)
+        self.assertNotIn('initialdir = "', sub_contents)
+
     def test_build_dag_renders_defaults_when_no_detrend_or_bls_overrides_given(self):
         """
         Regression test: the config template used to index straight into

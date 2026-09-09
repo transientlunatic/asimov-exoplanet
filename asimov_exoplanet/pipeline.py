@@ -55,8 +55,16 @@ def _write_submission_files(rundir, job_script, sub_filename, dag_filename, job_
     submit_file = os.path.join(rundir, sub_filename)
     with open(submit_file, "w") as f:
         f.write("universe = vanilla\n")
-        f.write(f'executable = "{job_script}"\n')
-        f.write(f'initialdir = "{rundir}"\n')
+        # Unlike a shell command line, HTCondor's submit-file language takes
+        # `executable`/`initialdir` as the literal remainder of the line --
+        # it does not strip surrounding quotes the way a shell would, so
+        # quoting these to "protect" against spaces instead makes HTCondor
+        # look for a path with literal quote characters in it. Confirmed by
+        # a real e2e failure: the job never even reached the schedd's queue
+        # (condor_q stayed empty for the full 600s wait) once these were
+        # quoted, and DAGMan wrote a rescue file instead.
+        f.write(f"executable = {job_script}\n")
+        f.write(f"initialdir = {rundir}\n")
         f.write("output = job.out\n")
         f.write("error = job.err\n")
         f.write("log = job.log\n")

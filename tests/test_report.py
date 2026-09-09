@@ -225,6 +225,45 @@ class BuildCatalogReportTests(unittest.TestCase):
         data = self._embedded_data(html)
         self.assertEqual(data["candidates"][0]["name"], "</script><script>alert(1)</script>")
 
+    def test_table_and_tooltip_rendering_does_not_interpolate_untrusted_data_into_html(self):
+        """
+        Regression test (Copilot review finding on PR #4): the candidate
+        table's ``renderTable()`` and the overview plot's tooltip handler
+        originally built markup with D3's ``.html()``, interpolating a
+        template literal containing the subject name (and vetting-flag
+        text) directly -- both from
+        blueprint metadata, an untrusted source -- directly into HTML. A name
+        like ``<img src=x onerror=...>`` would then execute as markup when
+        the report is opened, exactly the class of bug already fixed for the
+        per-target report's target_info (see
+        ``test_escapes_script_tag_breakout_in_embedded_data`` above and
+        ``BuildTargetReportTests`` in this file). Verified against a real
+        headless-browser render (not just this static source check) while
+        fixing this: the injected name/flags rendered as escaped text with
+        no script execution.
+
+        This can't run the report's JS from a plain unit test, so it checks
+        the template source builds cells with ``.text()``/``.attr()``
+        instead of interpolating candidate data into ``.html()`` strings.
+        """
+        self.assertNotIn("rows.html(d =>", report._CATALOG_TEMPLATE)
+        self.assertNotIn("${d.name}", report._CATALOG_TEMPLATE)
+        self.assertIn(".text(d.name)", report._CATALOG_TEMPLATE)
+
+    def test_overview_plot_handles_empty_or_all_missing_period_catalog(self):
+        """
+        Regression test (Copilot review finding on PR #4): the overview
+        plot's log x-scale used ``d3.scaleLog().domain(d3.extent(...))``
+        directly. ``d3.extent()`` returns ``[undefined, undefined]`` on an
+        empty array (e.g. no candidates, or none with a recovered period),
+        and ``scaleLog().domain([undefined, undefined])`` throws at render
+        time. Can't execute the report's JS from a plain unit test, so this
+        checks the template source guards the domain -- verified against a
+        real headless-browser render (an empty catalog report loaded with no
+        JS errors) while fixing this.
+        """
+        self.assertIn("periodExtent[0] === undefined", report._CATALOG_TEMPLATE)
+
 
 if __name__ == "__main__":
     unittest.main()

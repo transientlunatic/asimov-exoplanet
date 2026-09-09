@@ -519,15 +519,35 @@ function renderTable() {
   const rows = d3.select("#candidate-table tbody")
     .selectAll("tr")
     .data(sorted, d => d.name)
-    .join("tr");
+    .join("tr")
+    .order();
 
-  rows.html(d => `
-    <td><a href="${encodeURIComponent(d.name)}/folded_lightcurve.html">${d.name}</a></td>
-    <td class="numeric">${fmt(d.period, 5)}</td>
-    <td class="numeric">${d.depth === null || d.depth === undefined ? "n/a" : (d.depth * 1e6).toFixed(1)}</td>
-    <td class="numeric">${fmt(d.sde, 2)}</td>
-    <td>${d.flags.length === 0 ? '<span class="ok-badge">clean</span>' : `<span class="flag-badge" title="${d.flags.join('; ').replace(/"/g, '&quot;')}">${d.flags.length} flag${d.flags.length === 1 ? '' : 's'}</span>`}</td>
-  `);
+  // Subject names (and, in principle, vetting flag text) come from
+  // blueprint metadata -- an untrusted source -- so build each cell with
+  // .text()/.attr() rather than interpolating them into an .html() string;
+  // otherwise a name like "<img onerror=...>" would execute as markup.
+  rows.each(function (d) {
+    const tr = d3.select(this).html("");
+
+    tr.append("td").append("a")
+      .attr("href", `${encodeURIComponent(d.name)}/folded_lightcurve.html`)
+      .text(d.name);
+
+    tr.append("td").attr("class", "numeric").text(fmt(d.period, 5));
+    tr.append("td").attr("class", "numeric")
+      .text(d.depth === null || d.depth === undefined ? "n/a" : (d.depth * 1e6).toFixed(1));
+    tr.append("td").attr("class", "numeric").text(fmt(d.sde, 2));
+
+    const flagsCell = tr.append("td");
+    if (d.flags.length === 0) {
+      flagsCell.append("span").attr("class", "ok-badge").text("clean");
+    } else {
+      flagsCell.append("span")
+        .attr("class", "flag-badge")
+        .attr("title", d.flags.join("; "))
+        .text(`${d.flags.length} flag${d.flags.length === 1 ? "" : "s"}`);
+    }
+  });
 }
 
 d3.selectAll("#candidate-table th").on("click", function () {
@@ -555,8 +575,15 @@ const svg = d3.select("#overview-plot")
   .attr("height", height);
 const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
 
-const plottable = data.candidates.filter(d => d.period !== null && d.sde !== null && d.sde !== undefined);
-const x = d3.scaleLog().domain(d3.extent(plottable, d => d.period)).nice().range([0, innerWidth]);
+const plottable = data.candidates.filter(
+  d => d.period !== null && d.period !== undefined && d.period > 0 && d.sde !== null && d.sde !== undefined
+);
+// d3.extent() returns [undefined, undefined] on an empty array, which
+// scaleLog().domain() throws on -- fall back to a placeholder domain so an
+// empty (or all-missing-period) catalog still renders empty axes instead
+// of leaving the whole report broken.
+const periodExtent = d3.extent(plottable, d => d.period);
+const x = d3.scaleLog().domain(periodExtent[0] === undefined ? [0.1, 100] : periodExtent).nice().range([0, innerWidth]);
 const y = d3.scaleLinear().domain([0, d3.max(plottable, d => d.sde) || 1]).nice().range([innerHeight, 0]);
 
 g.append("g").attr("class", "axis").attr("transform", `translate(0,${innerHeight})`).call(d3.axisBottom(x).ticks(5, "~g"));
@@ -575,7 +602,12 @@ g.selectAll("circle")
   .attr("fill", d => d.flags.length === 0 ? "var(--accent)" : "var(--warn)")
   .attr("opacity", 0.75)
   .on("mouseover", (event, d) => {
-    tooltip.style("opacity", 1).html(`<strong>${d.name}</strong><br>period ${fmt(d.period, 4)} d<br>SDE ${fmt(d.sde, 2)}`);
+    tooltip.style("opacity", 1).html("");
+    tooltip.append("strong").text(d.name);
+    tooltip.append("br");
+    tooltip.append(() => document.createTextNode(`period ${fmt(d.period, 4)} d`));
+    tooltip.append("br");
+    tooltip.append(() => document.createTextNode(`SDE ${fmt(d.sde, 2)}`));
   })
   .on("mousemove", (event) => {
     tooltip.style("left", (event.pageX + 12) + "px").style("top", (event.pageY - 24) + "px");

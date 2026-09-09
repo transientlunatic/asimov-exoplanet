@@ -1,0 +1,61 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "setuptools_scm[toml]>=3.4.3",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+version_scheme = "release-branch-semver"
+local_scheme = "no-local-version"
+
+[project]
+name = "asimov-exoplanet"
+dynamic = ["version"]
+authors = [
+    { name = "Daniel Williams", email = "daniel.williams@ligo.org" },
+]
+description = "An Asimov pipeline plugin for searching stellar photometry for transiting exoplanets."
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Natural Language :: English",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "asimov",
+]
+
+[project.optional-dependencies]
+photometry = [
+    "astropy",
+    "lightkurve",
+    "astroquery",
+]
+test = [
+    "pytest",
+]
+
+[project.urls]
+"Source code" = "https://github.com/transientlunatic/asimov-exoplanet"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "asimov_exoplanet",
+]
+
+[project.entry-points."asimov.pipelines"]
+photometry-bls = "asimov_exoplanet.pipeline:BLSTransitSearch"
+photometry-bls-dummy = "asimov_exoplanet.pipeline:DummyTransitSearchPipeline"
+
+[project.entry-points."asimov.hooks.filesource"]
+mast = "asimov_exoplanet.filesource:MASTFileSource"

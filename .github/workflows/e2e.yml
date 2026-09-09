@@ -105,16 +105,20 @@ jobs:
             echo "--- photometry-bls.toml ---"
             cat working/KIC-11904151/transit-search/photometry-bls.toml
 
-      # This is the real completion criterion BLSTransitSearch.detect_completion()
-      # checks for, produced by a real run of the console script this
-      # pipeline's build_dag() wires up: a real MAST download (via
-      # lightkurve.search_lightcurve), a real detrend (astropy/lightkurve
-      # flatten), and a real astropy.timeseries.BoxLeastSquares search --
-      # not a mock or a stand-in pipeline.
-      - name: Wait for real BLS results
+      # results.json is the real completion criterion
+      # BLSTransitSearch.detect_completion() checks for, produced by a real
+      # run of the console script this pipeline's build_dag() wires up: a
+      # real MAST download (via lightkurve.search_lightcurve), a real
+      # detrend (astropy/lightkurve flatten), a real
+      # astropy.timeseries.BoxLeastSquares search, and Phase 2's vetting
+      # checks -- not a mock or a stand-in pipeline. folded_lightcurve.html
+      # (the per-target report) is written immediately afterwards in the
+      # same process; wait for both so there's no race against the report
+      # write completing.
+      - name: Wait for real BLS results and report
         uses: etive-io/actions/wait-for-files@v1
         with:
-          patterns: "results.json"
+          patterns: "results.json folded_lightcurve.html"
           directory: "working/KIC-11904151/transit-search"
           timeout: "600"
           interval: "15"
@@ -148,6 +152,37 @@ jobs:
                 f\"Kepler-10 b's known period {known_period} (diff={diff})\"
             )
             assert results['sde'] > 8.0, f\"SDE {results['sde']} is too low to call this a real detection\"
+            # Kepler-10 b is a genuine, well-characterised planet -- it
+            # should not trip the odd/even or secondary-eclipse checks.
+            assert results['vetting_flags'] == [], (
+                f\"Unexpected vetting flags for a known real planet: {results['vetting_flags']}\"
+            )
+            "
+
+      # Confirms the per-target report is a real, valid report for this
+      # specific run (embeds the real recovered period and the real
+      # sample count from the downloaded light curve), not just a file
+      # that happens to exist.
+      - name: Verify the per-target report was generated correctly
+        uses: etive-io/actions/run-asimov-command@v1
+        with:
+          script: |
+            cd e2e_project
+            python3 -c "
+            import json, re
+            with open('working/KIC-11904151/transit-search/results.json') as f:
+                results = json.load(f)
+            with open('working/KIC-11904151/transit-search/folded_lightcurve.html') as f:
+                html = f.read()
+            assert '<!doctype html>' in html.lower(), 'Report is not a valid HTML document'
+            assert 'd3' in html.lower(), 'Report does not load D3'
+            match = re.search(r'const data = (\{.*?\});', html, re.DOTALL)
+            assert match, 'Could not find embedded data JSON in report'
+            data = json.loads(match.group(1))
+            assert abs(data['result']['period'] - results['period']) < 1e-9, 'Report period does not match results.json'
+            assert data['target']['catalog_id'] == 11904151, 'Report is missing target metadata'
+            assert len(data['points']) > 100, f\"Suspiciously few light curve points embedded: {len(data['points'])}\"
+            print(f\"Report OK: {len(data['points'])} points embedded, period {data['result']['period']}\")
             "
 
       - name: Archive artifacts on failure

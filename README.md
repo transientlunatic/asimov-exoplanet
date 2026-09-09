@@ -10,11 +10,16 @@ See [`DESIGN.md`](DESIGN.md) for the full design and phased roadmap.
 
 ## Status
 
-This package has completed **Phase 1** of the roadmap in `DESIGN.md`: real
-MAST/`lightkurve` ingestion, detrending, and a Box Least Squares transit
-search are implemented and wired into `BLSTransitSearch`, with a worked
-blueprint at `examples/kepler-10.yaml`. Vetting and per-target/catalog
-reporting (Phase 2/3) are not yet implemented.
+This package has completed **Phases 1 through 3** of the roadmap in
+`DESIGN.md`: real MAST/`lightkurve` ingestion, detrending, a Box Least
+Squares transit search, odd/even and secondary-eclipse vetting checks, and
+an interactive per-target HTML report are implemented and wired into
+`BLSTransitSearch`, with a worked single-target blueprint at
+`examples/kepler-10.yaml`. Catalog-scale campaigns (`ProjectAnalysis`) are
+also supported -- an HTCondor DAG per campaign (one job per target plus a
+dependent aggregation job) and an aggregate candidate report -- with a
+worked multi-target blueprint at `examples/koi-catalog.yaml`. Slurm catalog
+submission has a known limitation: see "Open questions" in `DESIGN.md`.
 
 ## Installation
 
@@ -40,6 +45,14 @@ asimov manage build
 asimov manage submit
 ```
 
+## Trying it against a small catalog campaign
+
+```bash
+asimov apply -f examples/koi-catalog.yaml
+asimov manage build
+asimov manage submit
+```
+
 ## Package layout
 
 ```
@@ -47,7 +60,8 @@ asimov_exoplanet/
   pipeline.py            # BLSTransitSearch + DummyTransitSearchPipeline - the asimov.pipelines entry points
   filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
   photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
-  cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
+  vetting.py             # odd/even + secondary-eclipse checks - plain functions, same pattern
+  cli.py                 # asimov-exoplanet-bls / asimov-exoplanet-bls-catalog-report console scripts
   config_template.toml   # liquid-templated pipeline config
-  report.py              # per-target + per-catalog reporting (Phase 2, stub)
+  report.py              # per-target (Phase 2) and per-catalog (Phase 3) interactive HTML reports
 ```

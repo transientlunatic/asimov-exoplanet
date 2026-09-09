@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from asimov.scheduler import Slurm
 
-from asimov_exoplanet.pipeline import BLSTransitSearch, DummyTransitSearchPipeline
+from asimov_exoplanet.pipeline import BLSTransitSearch, DummyTransitSearchPipeline, _validate_subject_name
 
 
 class FakeEvent:
@@ -132,9 +132,13 @@ class BLSTransitSearchLifecycleTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_vet_not_yet_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            self.pipeline.vet(light_curve=None, search_result=None)
+    def test_vet_delegates_to_vetting_module(self):
+        sentinel_light_curve = object()
+        sentinel_search_result = {"period": 1.0, "epoch": 0.0, "duration": 0.1}
+        with patch("asimov_exoplanet.vetting.vet", return_value={"flags": []}) as mock_vet:
+            result = self.pipeline.vet(sentinel_light_curve, sentinel_search_result)
+        mock_vet.assert_called_once_with(sentinel_light_curve, sentinel_search_result)
+        self.assertEqual(result, {"flags": []})
 
     def test_detect_completion_is_false_when_no_rundir_contents(self):
         self.assertFalse(self.pipeline.detect_completion())
@@ -144,7 +148,7 @@ class BLSTransitSearchLifecycleTests(unittest.TestCase):
 
     def test_collect_assets_includes_results_and_plot_when_present(self):
         os.makedirs(self.rundir, exist_ok=True)
-        for filename in ("results.json", "folded_lightcurve.png"):
+        for filename in ("results.json", "folded_lightcurve.html"):
             with open(os.path.join(self.rundir, filename), "w") as f:
                 f.write("placeholder")
 
@@ -422,6 +426,257 @@ class BLSTransitSearchBuildDagTests(unittest.TestCase):
 
         analysis.pipeline.build_dag(dryrun=True)
         self.assertFalse(os.path.exists(rundir))
+
+
+class BLSTransitSearchCatalogDagTests(unittest.TestCase):
+    """
+    Phase 3: a catalog-scale campaign is a real
+    ``asimov.analysis.ProjectAnalysis`` over several subjects, so -- as with
+    ``BLSTransitSearchBuildDagTests`` above -- this needs a real asimov
+    project rather than a duck-typed stand-in.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cwd = os.getcwd()
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        os.chdir(self.test_dir)
+
+        from click.testing import CliRunner
+
+        from asimov.cli import project
+        from asimov.cli.application import apply_page
+        from asimov.ledger import YAMLLedger
+
+        runner = CliRunner()
+        result = runner.invoke(project.init, ["Test Project", "--root", self.test_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.ledger = YAMLLedger(os.path.join(self.test_dir, ".asimov", "ledger.yml"))
+
+        for name, catalog_id in [("KIC-1", 1), ("KIC-2", 2), ("KIC-3", 3)]:
+            blueprint = os.path.join(self.test_dir, f"{name}.yaml")
+            with open(blueprint, "w") as f:
+                f.write(
+                    "kind: event\n"
+                    f"name: {name}\n"
+                    "photometry:\n"
+                    "  mission: Kepler\n"
+                    f"  catalog id: {catalog_id}\n"
+                )
+            apply_page(file=blueprint, event=None, ledger=self.ledger)
+
+        self.rundir = os.path.join(self.test_dir, "run")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _make_project_analysis(self, **kwargs):
+        from asimov.analysis import ProjectAnalysis
+
+        return ProjectAnalysis(
+            subjects=["KIC-1", "KIC-2", "KIC-3"],
+            name="catalog-transit-search",
+            pipeline="photometry-bls",
+            status="ready",
+            ledger=self.ledger,
+            rundir=self.rundir,
+            **kwargs,
+        )
+
+    def test_build_dag_writes_per_subject_directories_and_configs(self):
+        analysis = self._make_project_analysis()
+        self.assertIsInstance(analysis.pipeline, BLSTransitSearch)
+
+        analysis.pipeline.build_dag()
+
+        for name, catalog_id in [("KIC-1", 1), ("KIC-2", 2), ("KIC-3", 3)]:
+            subject_dir = os.path.join(self.rundir, name)
+            config_path = os.path.join(subject_dir, "photometry-bls.toml")
+            self.assertTrue(os.path.exists(config_path))
+            with open(config_path) as f:
+                rendered = f.read()
+            self.assertIn(f"catalog_id = {catalog_id}", rendered)
+            self.assertIn('mission = "Kepler"', rendered)
+
+            job_script = os.path.join(subject_dir, "run_transit_search.sh")
+            self.assertTrue(os.path.exists(job_script))
+            sub_file = os.path.join(subject_dir, "run_transit_search.sub")
+            self.assertTrue(os.path.exists(sub_file))
+            self.assertTrue(os.path.exists(os.path.join(subject_dir, "sbatch_submit.sh")))
+
+    def test_build_dag_applies_project_wide_meta_to_every_subject(self):
+        analysis = self._make_project_analysis(
+            detrend={"window length": 0.3},
+            bls={"period min": 1.0, "period max": 5.0},
+        )
+        analysis.pipeline.build_dag()
+
+        for name in ["KIC-1", "KIC-2", "KIC-3"]:
+            config_path = os.path.join(self.rundir, name, "photometry-bls.toml")
+            with open(config_path) as f:
+                rendered = f.read()
+            self.assertIn("window_length = 0.3", rendered)
+            self.assertIn("period_min = 1.0", rendered)
+            self.assertIn("period_max = 5.0", rendered)
+
+    def test_dag_file_has_parent_child_dependency_on_aggregate_job(self):
+        analysis = self._make_project_analysis()
+        analysis.pipeline.build_dag()
+
+        dag_path = os.path.join(self.rundir, "transit_search.dag")
+        self.assertTrue(os.path.exists(dag_path))
+        with open(dag_path) as f:
+            dag_contents = f.read()
+
+        for name in ["KIC-1", "KIC-2", "KIC-3"]:
+            self.assertIn(f"JOB target_{name} {name}/run_transit_search.sub", dag_contents)
+        self.assertIn("JOB aggregate run_catalog_report.sub", dag_contents)
+
+        parent_lines = [line for line in dag_contents.splitlines() if line.startswith("PARENT")]
+        self.assertEqual(len(parent_lines), 1)
+        self.assertTrue(parent_lines[0].endswith("CHILD aggregate"))
+        for name in ["KIC-1", "KIC-2", "KIC-3"]:
+            self.assertIn(f"target_{name}", parent_lines[0])
+
+        aggregate_script = os.path.join(self.rundir, "run_catalog_report.sh")
+        self.assertTrue(os.path.exists(aggregate_script))
+        with open(aggregate_script) as f:
+            script = f.read()
+        self.assertIn("asimov-exoplanet-bls-catalog-report", script)
+        self.assertIn(self.rundir, script)
+
+        aggregate_sub = os.path.join(self.rundir, "run_catalog_report.sub")
+        self.assertTrue(os.path.exists(aggregate_sub))
+        with open(aggregate_sub) as f:
+            sub_contents = f.read()
+        self.assertIn(f"executable = {aggregate_script}", sub_contents)
+        self.assertNotIn('executable = "', sub_contents)
+
+    def test_build_dag_dryrun_creates_nothing(self):
+        analysis = self._make_project_analysis()
+        analysis.pipeline.build_dag(dryrun=True)
+        self.assertFalse(os.path.exists(self.rundir))
+
+    def test_detect_completion_and_collect_assets_check_catalog_report(self):
+        analysis = self._make_project_analysis()
+
+        self.assertFalse(analysis.pipeline.detect_completion())
+        self.assertEqual(analysis.pipeline.collect_assets(), {})
+
+        os.makedirs(self.rundir, exist_ok=True)
+        with open(os.path.join(self.rundir, "catalog_report.html"), "w") as f:
+            f.write("<html></html>")
+        with open(os.path.join(self.rundir, "candidates.json"), "w") as f:
+            f.write("{}")
+
+        self.assertTrue(analysis.pipeline.detect_completion())
+        assets = analysis.pipeline.collect_assets()
+        self.assertEqual(
+            assets,
+            {
+                "catalog_report": os.path.join(self.rundir, "catalog_report.html"),
+                "candidates": os.path.join(self.rundir, "candidates.json"),
+            },
+        )
+
+    @patch("subprocess.run")
+    def test_submit_dag_condor_hands_off_to_dagman(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.stdout = "1 job(s) submitted to cluster 24680."
+        mock_run.return_value = mock_result
+
+        analysis = self._make_project_analysis()
+        job_id = analysis.pipeline.submit_dag()
+
+        self.assertEqual(job_id, 24680)
+        mock_run.assert_called_once()
+        command = mock_run.call_args[0][0]
+        self.assertIn("condor_submit_dag", command)
+        self.assertIn("transit_search.dag", command)
+
+    def test_submit_dag_slurm_submits_each_subject_independently(self):
+        analysis = self._make_project_analysis()
+        analysis.pipeline._scheduler = Slurm()
+        analysis.pipeline._scheduler.submit = MagicMock(side_effect=[101, 102, 103])
+
+        job_ids = analysis.pipeline.submit_dag()
+
+        self.assertEqual(job_ids, [101, 102, 103])
+        self.assertEqual(analysis.pipeline._scheduler.submit.call_count, 3)
+        submitted_scripts = [call.args[0] for call in analysis.pipeline._scheduler.submit.call_args_list]
+        self.assertEqual(
+            submitted_scripts,
+            [os.path.join(name, "sbatch_submit.sh") for name in ["KIC-1", "KIC-2", "KIC-3"]],
+        )
+
+    def test_build_dag_rejects_a_subject_name_that_would_escape_the_run_directory(self):
+        """
+        Regression test (Copilot review finding on PR #4): subject names
+        come from blueprint metadata, and asimov core places no restriction
+        on them -- an event blueprint with ``name: '../evil'`` applies
+        without complaint (confirmed directly against a real ledger while
+        fixing this). Before this fix, ``_build_catalog_dag`` used
+        ``subject.name`` directly in ``os.path.join(rundir, subject.name)``,
+        so such a name would write the target's job files outside the
+        campaign run directory entirely, and could also corrupt
+        ``transit_search.dag`` (a line-based, whitespace-delimited format)
+        if the name contained whitespace. ``_validate_subject_name`` now
+        rejects anything outside a conservative safe set before any path or
+        DAG line is built from it.
+        """
+        from asimov.cli.application import apply_page
+
+        blueprint = os.path.join(self.test_dir, "evil.yaml")
+        with open(blueprint, "w") as f:
+            f.write(
+                "kind: event\n"
+                "name: '../evil'\n"
+                "photometry:\n"
+                "  mission: Kepler\n"
+                "  catalog id: 99\n"
+            )
+        apply_page(file=blueprint, event=None, ledger=self.ledger)
+
+        from asimov.analysis import ProjectAnalysis
+
+        analysis = ProjectAnalysis(
+            subjects=["../evil"],
+            name="catalog-transit-search",
+            pipeline="photometry-bls",
+            status="ready",
+            ledger=self.ledger,
+            rundir=self.rundir,
+        )
+
+        with self.assertRaisesRegex(ValueError, "not safe to use in a catalog campaign"):
+            analysis.pipeline.build_dag()
+
+        # Confirm the run directory itself stays empty -- no per-subject
+        # directory was written for the malicious name before validation
+        # caught it.
+        self.assertEqual(os.listdir(self.rundir), [])
+
+
+class SubjectNameValidationTests(unittest.TestCase):
+    """Unit-level coverage for ``_validate_subject_name`` -- see the
+    regression test above for the end-to-end ``build_dag`` behaviour."""
+
+    def test_accepts_real_catalog_identifiers(self):
+        for name in ["KIC-11446443", "TIC-12345", "Kepler-10", "epic_201367065", "target.1"]:
+            _validate_subject_name(name)  # must not raise
+
+    def test_rejects_path_traversal_and_separators(self):
+        for name in ["..", ".", "../evil", "a/b", "a\\b", "/etc/passwd"]:
+            with self.assertRaises(ValueError):
+                _validate_subject_name(name)
+
+    def test_rejects_whitespace_and_newlines(self):
+        for name in ["KIC 1", "KIC-1\n", "KIC-1\tTAB", "line1\nline2"]:
+            with self.assertRaises(ValueError):
+                _validate_subject_name(name)
 
 
 if __name__ == "__main__":

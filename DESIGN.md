@@ -45,9 +45,10 @@ asimov_exoplanet/
   pipeline.py            # BLSTransitSearch(Pipeline) - the asimov.pipelines entry point
   filesource.py          # MAST/Kepler asimov.hooks.filesource entry point
   photometry.py          # detrend()/search() - plain functions, unit-testable without Asimov
-  cli.py                 # asimov-exoplanet-bls console script: the job build_dag() actually runs
+  vetting.py             # odd/even + secondary-eclipse checks - plain functions, same pattern
+  cli.py                 # asimov-exoplanet-bls / asimov-exoplanet-bls-catalog-report console scripts
   config_template.toml   # liquid-templated pipeline config
-  report.py              # per-target + per-catalog reporting
+  report.py              # per-target (Phase 2) and per-catalog (Phase 3) interactive HTML reports
 ```
 
 ## MVP pipeline stages (Phase 1)
@@ -69,12 +70,18 @@ anything more sensitive (like `transitleastsquares`) is considered.
 3. **Transit search** — run BLS over a period grid; record the best period,
    epoch, duration, depth, and a significance statistic (SDE or equivalent).
 4. **Vet** — cheap, deterministic checks only for the MVP: odd/even transit
-   depth consistency, a secondary-eclipse search at phase 0.5, and
-   per-quarter/sector consistency where available. This is **not** full
-   centroid/pixel-level vetting (which needs target pixel files, not just
-   light curves) — that's future work (Phase 4).
+   depth consistency (`vetting.check_odd_even`) and a secondary-eclipse
+   search at phase 0.5 (`vetting.check_secondary_eclipse`). Per-quarter/sector
+   consistency is **not** implemented -- it needs multiple quarters/sectors
+   of data, and `ingest()` currently fetches only the first
+   `lightkurve.search_lightcurve` result (see "Open questions"). This is
+   also **not** full centroid/pixel-level vetting (which needs target pixel
+   files, not just light curves) — that's future work (Phase 4).
 5. **Report** — a small machine-readable `results.json` (period, depth,
-   duration, SDE, vetting flags) plus a folded-light-curve plot, analogous to
+   duration, SDE, vetting flags) plus an interactive folded-light-curve
+   report (`report.build_target_report`): a self-contained HTML page with a
+   D3 phase-folded scatter plot (odd/even cycles coloured separately, the
+   BLS box model overlaid) and a secondary-eclipse zoom panel, analogous to
    `collect_assets` for GW pipelines.
 
 ## Pipeline class
@@ -82,15 +89,28 @@ anything more sensitive (like `transitleastsquares`) is considered.
 `BLSTransitSearch` subclasses `asimov.pipeline.Pipeline`, registered under
 the name `photometry-bls`:
 
-- `build_dag(dryrun=False)` — write an executable script (or, for catalog
-  campaigns, one row of an HTCondor/Slurm DAG per subject) running
-  ingest → detrend → BLS → vet → report, writing `results.json` into
-  `self.production.rundir`.
+- `build_dag(dryrun=False)` — for a single-target `SimpleAnalysis`, write an
+  executable job script running ingest → detrend → BLS → vet → report,
+  writing `results.json` into `self.production.rundir`. For a catalog-scale
+  `ProjectAnalysis`, write one such job per subject into
+  `<rundir>/<subject name>/`, plus a final aggregation job (depending on
+  every subject job via an HTCondor DAGMan `PARENT`/`CHILD` line) that scans
+  all the per-subject `results.json` files and builds the campaign-wide
+  candidate report.
 - `submit_dag(dryrun=False)` — hand off to the configured scheduler
-  (`asimov.scheduler.Slurm` or HTCondor), same as other pipelines.
-- `detect_completion()` — `os.path.exists(os.path.join(self.production.rundir, "results.json"))`.
-- `collect_assets()` — returns
-  `{"results": .../results.json, "folded_lightcurve": .../folded_lightcurve.png}`.
+  (`asimov.scheduler.Slurm` or HTCondor). Under HTCondor this is a single
+  `condor_submit_dag` call in both cases; DAGMan itself enforces the
+  subject/aggregation dependency for a catalog campaign. Slurm has no
+  dependency-chaining support in this plugin (see "Open questions" below),
+  so for a catalog campaign each subject job is submitted independently and
+  the aggregation step is **not** automatically triggered.
+- `detect_completion()` — for a `SimpleAnalysis`,
+  `os.path.exists(os.path.join(self.production.rundir, "results.json"))`;
+  for a `ProjectAnalysis`, checks for `catalog_report.html` instead.
+- `collect_assets()` — for a `SimpleAnalysis`, returns
+  `{"results": .../results.json, "folded_lightcurve": .../folded_lightcurve.html}`;
+  for a `ProjectAnalysis`, returns
+  `{"catalog_report": .../catalog_report.html, "candidates": .../candidates.json}`.
 
 Each stage is fast and deterministic, so a single target can reasonably run
 as one job. The DAG/scheduler machinery starts mattering once a
@@ -124,15 +144,28 @@ comment: BLS transit search on Kepler-10
 > without an explicit CLI `-e`/`--event` flag needs its target named via an
 > `event:` field, or `apply_page` will prompt for it interactively.
 
-A catalog-scale `ProjectAnalysis` (Phase 3):
+A catalog-scale `ProjectAnalysis` (Phase 3; see `examples/koi-catalog.yaml` for
+a worked, verified-working version of this against real KIC targets):
 
 ```yaml
-kind: project_analysis
+kind: projectanalysis
 name: koi-catalog-rerun
 pipeline: photometry-bls
-subjects: koi-active-list.txt
-comment: Re-run BLS across all active KOIs with an updated detrending window
+subjects:
+  - KIC-11446443
+  - KIC-11913073
+comment: Re-run BLS across these KOIs with an updated detrending window
 ```
+
+> **Note:** the original design sketched `kind: project_analysis` and a bare
+> filename (`subjects: koi-active-list.txt`) for a list of targets. Neither
+> works: `apply_page` matches blueprint kinds case-insensitively but without
+> normalising underscores, so it only recognises `kind: projectanalysis` (no
+> underscore) -- `project_analysis` is silently a no-op (exit 0, ledger
+> unchanged). And `ProjectAnalysis.__init__` assigns `subjects:` directly to
+> `self._subjects` with no file-expansion logic, so it must be an actual YAML
+> list of subject names already known to the ledger (i.e. each named by a
+> prior `kind: event` blueprint), not a path to a file listing them.
 
 ## Configuration templating
 
@@ -289,12 +322,28 @@ monitoring). Instead:
   light curves (no network access needed in CI -- MAST/lightkurve calls are
   mocked at the `lightkurve.search_lightcurve`/`MASTFileSource.fetch`
   boundary). `vet()` remains a stub (Phase 2).
-- **Phase 2 — Vetting & reporting**: odd/even and secondary-eclipse checks,
-  folded-light-curve plots, per-target report.
-- **Phase 3 — Catalog-scale campaigns**: `ProjectAnalysis` support,
-  HTCondor/Slurm DAG generation for batch submission, an aggregate
-  report/dashboard (candidate table, completeness plots for
-  injection-recovery studies).
+- **Phase 2 — Vetting & reporting** *(done)*: odd/even and secondary-eclipse
+  checks (`vetting.py`), wired into both `BLSTransitSearch.vet()` and the
+  `asimov-exoplanet-bls` console script (`cli.py`), so `results.json`'s
+  `vetting_flags` are now real; an interactive per-target HTML report
+  (`report.py`, D3-based) written alongside `results.json` and exposed via
+  `collect_assets()`. Verified against real Kepler-10 data in the e2e
+  workflow (no vetting flags raised for a genuine planet, as expected) and
+  against synthetic light curves with injected eclipsing-binary-like
+  signals in unit tests (`tests/test_vetting.py`). Per-quarter/sector
+  consistency remains out of scope (see the roadmap item above).
+- **Phase 3 — Catalog-scale campaigns** *(done)*: `ProjectAnalysis` support
+  (`BLSTransitSearch._build_catalog_dag`/`_submit_catalog_dag`), an HTCondor
+  DAG with one job per subject plus a dependent aggregation job, an
+  aggregate candidate report (`report.build_catalog_report`, D3-based: a
+  sortable candidate table linking to each target's own per-target report,
+  plus a period-vs-SDE overview plot), and a worked catalog blueprint
+  (`examples/koi-catalog.yaml`). Two deliberate scope cuts versus the
+  original sketch: (1) Slurm catalog submission does not chain the
+  aggregation job -- see "Open questions" below; (2) "completeness plots for
+  injection-recovery studies" are not implemented, since they need known
+  injected truth values per target that this plugin doesn't track -- left
+  for a later phase.
 - **Phase 4 — Stretch**: a pluggable transit-search backend
   (`transitleastsquares` as an alternative to BLS), multi-mission support
   (TESS, K2), pixel-level vetting using target pixel files.
@@ -321,12 +370,24 @@ These don't need to be resolved now, but are worth recording:
 - **Storage of downloaded FITS files.** Light curve FITS files should be
   treated as run-directory assets, not committed into any git-backed ledger
   repository — these can be large and numerous at catalog scale.
-- **Depth of vetting required before Phase 2 is "done".** The MVP's
-  deterministic checks (odd/even depth, secondary eclipse, per-sector
-  consistency) are not a substitute for full centroid/pixel-level vetting,
-  which needs target pixel files rather than just light curves. Phase 2
-  should probably ship with this limitation clearly documented rather than
-  wait for pixel-level vetting to be ready.
+- **Depth of vetting: resolved for Phase 2, revisit later.** Phase 2 shipped
+  with exactly two checks (odd/even depth, secondary eclipse) and explicitly
+  does not attempt per-sector consistency (needs `ingest()` to fetch and
+  stitch multiple quarters/sectors, which it doesn't) or centroid/pixel-level
+  vetting (needs target pixel files, not just light curves). Both remain real
+  gaps versus a production-grade vetting report (e.g. the Kepler Robovetter)
+  -- worth reconsidering if this plugin is ever used for anything beyond a
+  smoke-test-scale demonstration.
+- **Slurm catalog-campaign dependency chaining.** `asimov.scheduler.Slurm`
+  exposes a simple `.submit(script_path)` with no built-in support for
+  dependent job chains (unlike HTCondor DAGMan's native `PARENT`/`CHILD`).
+  For a catalog `ProjectAnalysis`, `_submit_catalog_dag` currently submits
+  every subject's job independently under Slurm and logs a warning that the
+  aggregation step needs a manual, later
+  `asimov-exoplanet-bls-catalog-report <rundir>` invocation once every
+  subject job has finished. Slurm job dependencies (`sbatch --dependency=afterok:<ids>`)
+  could close this gap, but haven't been implemented -- catalog campaigns in
+  this plugin have only been exercised against HTCondor so far.
 - **How the PE stage reads the search stage's output.** `needs:` gives
   dependency ordering, but nothing in this package yet reads one
   analysis's `collect_assets()`/results file to build another analysis's
@@ -376,7 +437,10 @@ Two layers, matching the pattern other Asimov pipeline plugins (e.g.
 - **Unit tests** (`pytest`, run on every push/PR): mirror
   `asimov/pipelines/testing` in asimov core. Build a pipeline instance
   against synthetic light curves with a known injected transit (fixed
-  period/depth/duration), assert that BLS recovers it within tolerance, and
+  period/depth/duration), assert that BLS recovers it within tolerance,
+  assert the vetting checks pass on a clean signal and flag synthetic
+  eclipsing-binary-like signals (alternating odd/even depths, an injected
+  secondary eclipse), assert the HTML report embeds the right data, and
   exercise `build_dag`/`detect_completion`/`collect_assets` without network
   access or a real scheduler (MAST/lightkurve calls are mocked at the
   `lightkurve.search_lightcurve`/`MASTFileSource.fetch` boundary).
@@ -387,10 +451,26 @@ Two layers, matching the pattern other Asimov pipeline plugins (e.g.
   `examples/kepler-10.yaml` — the same file documented as the worked
   example, so this doubles as proof the example works). Asserts BLS
   recovers Kepler-10 b's known ~0.8375-day period from the real downloaded
-  light curve, not just that a `results.json` file exists. Uses the shared
-  `etive-io/actions` composite actions (`setup-htcondor`,
+  light curve (not just that a `results.json` file exists), that no
+  vetting flags are raised for this genuine planet, and that the HTML
+  report is well-formed and carries this run's actual data. Uses the
+  shared `etive-io/actions` composite actions (`setup-htcondor`,
   `create-submit-user`, `run-asimov-command`, `wait-for-files`) that
   `asimov-lalinference`'s own `e2e.yml` uses, plus a package-local
   `setup-exoplanet-env` action (conda env + pip install, no conda-only
   dependencies needed since `astropy`/`lightkurve`/`astroquery` are all pure
   PyPI wheels).
+
+  `e2e.yml` currently only exercises the single-target (`SimpleAnalysis`)
+  path via `examples/kepler-10.yaml`. `examples/koi-catalog.yaml`'s
+  `ProjectAnalysis` has been verified directly (real ledger apply + real
+  `BLSTransitSearch.build_dag()`, producing correct per-subject
+  directories, configs, and a DAG with the right `PARENT`/`CHILD`
+  aggregation dependency -- see `BLSTransitSearchCatalogDagTests` in
+  `tests/test_pipeline.py`), but not yet through the full
+  `asimov manage build submit`/`asimov monitor` CLI path the way the
+  single-target e2e test is. Asimov core's `manage.py` has separate,
+  more involved handling for `ledger.project_analyses` (interest-based
+  scheduling across repeated analyses) that this plugin's minimal
+  `ProjectAnalysis` usage doesn't exercise -- worth a dedicated e2e job in
+  a later pass, rather than folding into this phase's already-broad scope.

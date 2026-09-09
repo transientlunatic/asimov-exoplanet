@@ -113,6 +113,32 @@ class BuildTargetReportTests(unittest.TestCase):
             data = self._embedded_data(f.read())
         self.assertIsNone(data["result"]["sde"])
 
+    def test_escapes_script_tag_breakout_in_embedded_data(self):
+        """
+        Regression test: target_info comes from blueprint metadata (an
+        untrusted source, in principle), and was originally embedded via a
+        plain ``json.dumps()`` inside a ``<script>`` tag. A mission/
+        catalog_id string containing ``</script>`` could break out of the
+        script tag and inject arbitrary HTML/JS into the report when opened
+        in a browser.
+        """
+        malicious_target_info = {"catalog_id": "</script><script>alert(1)</script>", "mission": "Kepler"}
+
+        report.build_target_report(
+            self.light_curve,
+            self.search_result,
+            self.vetting_result,
+            self.output_path,
+            target_info=malicious_target_info,
+        )
+
+        with open(self.output_path) as f:
+            html = f.read()
+
+        self.assertNotIn("</script><script>alert", html)
+        data = self._embedded_data(html)
+        self.assertEqual(data["target"]["catalog_id"], malicious_target_info["catalog_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

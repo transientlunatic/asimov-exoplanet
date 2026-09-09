@@ -122,8 +122,11 @@ def check_secondary_eclipse(light_curve, period, epoch, duration):
     Returns
     -------
     dict
-        ``secondary_depth``, ``significance``, and ``detected`` (bool,
-        ``True`` if a significant secondary eclipse was found).
+        ``secondary_depth``, ``significance``, ``detected`` (bool, ``True``
+        if a significant secondary eclipse was found), and
+        ``baseline_scatter`` (the out-of-transit flux scatter used as the
+        significance threshold's reference level; ``None`` if it couldn't
+        be computed).
     """
     times = light_curve.time.value
     flux = light_curve.flux.value if hasattr(light_curve.flux, "value") else np.asarray(light_curve.flux)

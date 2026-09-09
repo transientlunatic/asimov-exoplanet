@@ -104,7 +104,11 @@ def build_target_report(light_curve, search_result, vetting_result, output_path,
         "points": points,
     }
 
-    html = _TEMPLATE.replace("__DATA_JSON__", json.dumps(data))
+    # target_info comes from blueprint metadata, so treat it as untrusted:
+    # escape "</" so a mission/catalog_id string containing "</script>"
+    # can't break out of the <script> tag it's embedded in.
+    embedded_json = json.dumps(data).replace("</", "<\\/")
+    html = _TEMPLATE.replace("__DATA_JSON__", embedded_json)
 
     with open(output_path, "w") as f:
         f.write(html)

@@ -230,10 +230,27 @@ These don't need to be resolved now, but are worth recording:
 
 ## Testing strategy
 
-Mirrors `asimov/pipelines/testing` in asimov core: unit tests build a
-pipeline instance against synthetic light curves with a known injected
-transit (fixed period/depth/duration), assert that BLS recovers it within
-tolerance, and exercise `build_dag`/`detect_completion`/`collect_assets`
-without network access or a real scheduler. End-to-end tests can later use a
-small, fixed real target (e.g. Kepler-10, whose transits are
-well-characterised) checked against published ground truth.
+Two layers, matching the pattern other Asimov pipeline plugins (e.g.
+`asimov-lalinference`) use:
+
+- **Unit tests** (`pytest`, run on every push/PR): mirror
+  `asimov/pipelines/testing` in asimov core. Build a pipeline instance
+  against synthetic light curves with a known injected transit (fixed
+  period/depth/duration), assert that BLS recovers it within tolerance, and
+  exercise `build_dag`/`detect_completion`/`collect_assets` without network
+  access or a real scheduler (MAST/lightkurve calls are mocked at the
+  `lightkurve.search_lightcurve`/`MASTFileSource.fetch` boundary).
+- **End-to-end test** (`.github/workflows/e2e.yml`, run on every push/PR): a
+  real HTCondor container (`htcondor/mini`), the real `photometry-bls`
+  pipeline, `asimov apply`/`asimov manage build submit`/`asimov monitor` as
+  a user actually would, against a real MAST target (Kepler-10,
+  `examples/kepler-10.yaml` — the same file documented as the worked
+  example, so this doubles as proof the example works). Asserts BLS
+  recovers Kepler-10 b's known ~0.8375-day period from the real downloaded
+  light curve, not just that a `results.json` file exists. Uses the shared
+  `etive-io/actions` composite actions (`setup-htcondor`,
+  `create-submit-user`, `run-asimov-command`, `wait-for-files`) that
+  `asimov-lalinference`'s own `e2e.yml` uses, plus a package-local
+  `setup-exoplanet-env` action (conda env + pip install, no conda-only
+  dependencies needed since `astropy`/`lightkurve`/`astroquery` are all pure
+  PyPI wheels).

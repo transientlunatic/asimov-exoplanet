@@ -1,0 +1,144 @@
+"""
+Unit tests for the per-target HTML report. Checks the report is
+well-formed and carries the right data, not its visual appearance.
+"""
+
+import json
+import os
+import re
+import shutil
+import tempfile
+import unittest
+
+import numpy as np
+
+try:
+    import lightkurve as lk
+
+    from asimov_exoplanet import report
+
+    REPORT_AVAILABLE = True
+except ImportError:
+    REPORT_AVAILABLE = False
+
+
+@unittest.skipUnless(REPORT_AVAILABLE, "astropy/lightkurve not installed")
+class BuildTargetReportTests(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        rng = np.random.default_rng(0)
+        n = 500
+        time = np.arange(n) * 0.0208
+        flux = np.ones(n) + rng.normal(0, 0.0003, n)
+        self.light_curve = lk.LightCurve(time=time, flux=flux)
+        self.search_result = {
+            "period": 3.2,
+            "epoch": 0.7,
+            "duration": 0.12,
+            "depth": 0.01,
+            "sde": 15.0,
+        }
+        self.vetting_result = {
+            "flags": [],
+            "odd_even": {"odd_depth": 0.01, "even_depth": 0.0099, "significance": 0.5, "consistent": True},
+            "secondary_eclipse": {"secondary_depth": 0.0, "significance": 0.1, "detected": False},
+        }
+        self.output_path = os.path.join(self.test_dir, "folded_lightcurve.html")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _embedded_data(self, html):
+        match = re.search(r"const data = (\{.*?\});", html, re.DOTALL)
+        self.assertIsNotNone(match, "could not find embedded data JSON in report")
+        return json.loads(match.group(1))
+
+    def test_writes_html_file_with_embedded_data(self):
+        returned_path = report.build_target_report(
+            self.light_curve,
+            self.search_result,
+            self.vetting_result,
+            self.output_path,
+            target_info={"catalog_id": 11446443, "mission": "Kepler"},
+        )
+
+        self.assertEqual(returned_path, self.output_path)
+        self.assertTrue(os.path.exists(self.output_path))
+
+        with open(self.output_path) as f:
+            html = f.read()
+
+        self.assertIn("<!doctype html>", html.lower())
+        self.assertIn("d3", html.lower())
+
+        data = self._embedded_data(html)
+        self.assertEqual(data["target"]["catalog_id"], 11446443)
+        self.assertEqual(data["result"]["period"], 3.2)
+        self.assertEqual(len(data["points"]), len(self.light_curve))
+
+    def test_includes_vetting_flags_in_embedded_data(self):
+        flagged_vetting_result = dict(self.vetting_result, flags=["odd/even transit depth mismatch"])
+
+        report.build_target_report(
+            self.light_curve, self.search_result, flagged_vetting_result, self.output_path
+        )
+
+        with open(self.output_path) as f:
+            data = self._embedded_data(f.read())
+
+        self.assertEqual(data["vetting"]["flags"], ["odd/even transit depth mismatch"])
+
+    def test_subsamples_large_light_curves(self):
+        rng = np.random.default_rng(1)
+        n = report.MAX_EMBEDDED_POINTS * 3
+        time = np.arange(n) * 0.001
+        flux = np.ones(n) + rng.normal(0, 0.0003, n)
+        big_light_curve = lk.LightCurve(time=time, flux=flux)
+
+        report.build_target_report(big_light_curve, self.search_result, self.vetting_result, self.output_path)
+
+        with open(self.output_path) as f:
+            data = self._embedded_data(f.read())
+
+        self.assertEqual(len(data["points"]), report.MAX_EMBEDDED_POINTS)
+
+    def test_handles_missing_sde_gracefully(self):
+        result_without_sde = dict(self.search_result)
+        del result_without_sde["sde"]
+
+        # Should not raise even though .sde is absent.
+        report.build_target_report(self.light_curve, result_without_sde, self.vetting_result, self.output_path)
+
+        with open(self.output_path) as f:
+            data = self._embedded_data(f.read())
+        self.assertIsNone(data["result"]["sde"])
+
+    def test_escapes_script_tag_breakout_in_embedded_data(self):
+        """
+        Regression test: target_info comes from blueprint metadata (an
+        untrusted source, in principle), and was originally embedded via a
+        plain ``json.dumps()`` inside a ``<script>`` tag. A mission/
+        catalog_id string containing ``</script>`` could break out of the
+        script tag and inject arbitrary HTML/JS into the report when opened
+        in a browser.
+        """
+        malicious_target_info = {"catalog_id": "</script><script>alert(1)</script>", "mission": "Kepler"}
+
+        report.build_target_report(
+            self.light_curve,
+            self.search_result,
+            self.vetting_result,
+            self.output_path,
+            target_info=malicious_target_info,
+        )
+
+        with open(self.output_path) as f:
+            html = f.read()
+
+        self.assertNotIn("</script><script>alert", html)
+        data = self._embedded_data(html)
+        self.assertEqual(data["target"]["catalog_id"], malicious_target_info["catalog_id"])
+
+
+if __name__ == "__main__":
+    unittest.main()

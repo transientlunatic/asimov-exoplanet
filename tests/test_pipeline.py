@@ -132,9 +132,13 @@ class BLSTransitSearchLifecycleTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_vet_not_yet_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            self.pipeline.vet(light_curve=None, search_result=None)
+    def test_vet_delegates_to_vetting_module(self):
+        sentinel_light_curve = object()
+        sentinel_search_result = {"period": 1.0, "epoch": 0.0, "duration": 0.1}
+        with patch("asimov_exoplanet.vetting.vet", return_value={"flags": []}) as mock_vet:
+            result = self.pipeline.vet(sentinel_light_curve, sentinel_search_result)
+        mock_vet.assert_called_once_with(sentinel_light_curve, sentinel_search_result)
+        self.assertEqual(result, {"flags": []})
 
     def test_detect_completion_is_false_when_no_rundir_contents(self):
         self.assertFalse(self.pipeline.detect_completion())
@@ -144,7 +148,7 @@ class BLSTransitSearchLifecycleTests(unittest.TestCase):
 
     def test_collect_assets_includes_results_and_plot_when_present(self):
         os.makedirs(self.rundir, exist_ok=True)
-        for filename in ("results.json", "folded_lightcurve.png"):
+        for filename in ("results.json", "folded_lightcurve.html"):
             with open(os.path.join(self.rundir, filename), "w") as f:
                 f.write("placeholder")
 

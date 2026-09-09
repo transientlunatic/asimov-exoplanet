@@ -15,11 +15,11 @@ This module provides two pipelines, both registered under the
 
 ``BLSTransitSearch``
     The real pipeline (``photometry-bls``): ingest a light curve via the
-    ``mast`` filesource hook, detrend it (``photometry.detrend``), and run
-    a Box Least Squares transit search (``photometry.search``). See
-    ``DESIGN.md`` for the full design and phased roadmap. Vetting and
-    reporting (folded-light-curve plots) are Phase 2 work and are not yet
-    implemented.
+    ``mast`` filesource hook, detrend it (``photometry.detrend``), run a
+    Box Least Squares transit search (``photometry.search``), vet the
+    candidate (``vetting.vet``), and write a per-target report
+    (``report.build_target_report``). See ``DESIGN.md`` for the full
+    design and phased roadmap.
 """
 
 import json
@@ -246,16 +246,19 @@ class BLSTransitSearch(Pipeline):
 
     Runs: ingest a light curve for the subject's catalog ID via the
     ``mast`` filesource hook -> detrend it -> Box Least Squares transit
-    search -> write a machine-readable ``results.json``. See
-    ``DESIGN.md`` for the full design and phased roadmap.
+    search -> vet the candidate (odd/even depth, secondary eclipse) ->
+    write a machine-readable ``results.json`` and an interactive
+    folded-light-curve report. See ``DESIGN.md`` for the full design and
+    phased roadmap.
 
     Requires the ``photometry`` extra (``pip install asimov-exoplanet[photometry]``)
     for ``astropy``/``lightkurve``/``astroquery``.
 
     .. note::
-       Vetting (odd/even depth, secondary eclipse) and reporting
-       (folded-light-curve plots, per-target HTML reports) are Phase 2
-       work and are not yet implemented -- ``vet()`` remains a stub.
+       Vetting is deliberately limited to cheap, deterministic checks on
+       the single light curve already fetched (odd/even depth, secondary
+       eclipse) -- see ``asimov_exoplanet.vetting``. Per-sector consistency
+       and centroid/pixel-level vetting are out of scope for this MVP.
 
     Examples
     --------
@@ -355,8 +358,17 @@ class BLSTransitSearch(Pipeline):
         )
 
     def vet(self, light_curve, search_result):
-        """Run cheap deterministic vetting checks on a candidate transit signal."""
-        raise NotImplementedError("Phase 2: vetting checks are not yet implemented.")
+        """
+        Run cheap deterministic vetting checks on a candidate transit signal.
+
+        See ``asimov_exoplanet.vetting`` for what's actually checked
+        (odd/even transit-depth consistency, a secondary-eclipse search)
+        and what's deliberately out of scope for this MVP (per-sector
+        consistency, centroid/pixel-level vetting).
+        """
+        from . import vetting
+
+        return vetting.vet(light_curve, search_result)
 
     def build_dag(self, user=None, dryrun=False):
         """
@@ -428,7 +440,7 @@ class BLSTransitSearch(Pipeline):
             results = os.path.join(self.production.rundir, "results.json")
             if os.path.exists(results):
                 assets["results"] = results
-            plot = os.path.join(self.production.rundir, "folded_lightcurve.png")
-            if os.path.exists(plot):
-                assets["folded_lightcurve"] = plot
+            report_path = os.path.join(self.production.rundir, "folded_lightcurve.html")
+            if os.path.exists(report_path):
+                assets["folded_lightcurve"] = report_path
         return assets

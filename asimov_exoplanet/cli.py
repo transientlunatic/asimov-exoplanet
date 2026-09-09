@@ -20,14 +20,15 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-from . import photometry
+from . import photometry, report, vetting
 from .filesource import MASTFileSource
 
 
 def run(config_path, output_dir):
     """
-    Run ingest -> detrend -> BLS search for one target, writing
-    ``results.json`` into ``output_dir``.
+    Run ingest -> detrend -> BLS search -> vet -> report for one target,
+    writing ``results.json`` and ``folded_lightcurve.html`` into
+    ``output_dir``.
 
     Parameters
     ----------
@@ -73,11 +74,20 @@ def run(config_path, output_dir):
         period_max=bls_config.get("period_max", 20.0),
         duration_grid=bls_config.get("duration_grid", [0.05, 0.10, 0.20]),
     )
-    result["vetting_flags"] = []
+    vetting_result = vetting.vet(flattened, result)
+    result["vetting_flags"] = vetting_result["flags"]
 
     results_path = os.path.join(output_dir, "results.json")
     with open(results_path, "w") as f:
         json.dump(result, f, indent=2)
+
+    report.build_target_report(
+        flattened,
+        result,
+        vetting_result,
+        os.path.join(output_dir, "folded_lightcurve.html"),
+        target_info=target,
+    )
 
     return results_path
 

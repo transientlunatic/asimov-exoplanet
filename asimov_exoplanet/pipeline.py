@@ -82,7 +82,7 @@ class DummyTransitSearchPipeline(Pipeline):
             f.write("set -e\n")
             f.write(f"echo 'Working directory: {self.production.rundir}'\n")
             f.write(
-                "python -c \"import json; "
+                "python3 -c \"import json; "
                 "json.dump({'period': 1.0, 'epoch': 0.0, 'duration': 0.1, "
                 "'depth': 0.001, 'sde': 10.0, 'vetting_flags': []}, "
                 f"open('{results_file}', 'w'))\"\n"

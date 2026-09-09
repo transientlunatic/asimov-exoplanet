@@ -45,6 +45,29 @@ def _ensure_rundir(rundir):
     return True
 
 
+#: Subject names in a catalog campaign come from blueprint metadata and are
+#: used directly to build filesystem paths (``<rundir>/<subject name>/``)
+#: and HTCondor DAGMan job labels/lines. An unrestricted name -- e.g.
+#: containing "..", a path separator, or whitespace -- could escape the
+#: campaign run directory or corrupt the generated DAG file (DAGMan node
+#: names and its line-based file format don't tolerate whitespace). Real
+#: catalog entries are always simple catalog identifiers (KIC-####,
+#: TIC-####, Kepler-10, ...), so reject anything outside a conservative
+#: safe set up front rather than trying to escape/quote every special case.
+#: \Z (not $) so a trailing newline in the name isn't let through -- re's $
+#: matches just before a string-ending newline as well as at the true end.
+_SAFE_SUBJECT_NAME = re.compile(r"^[A-Za-z0-9_.+-]+\Z")
+
+
+def _validate_subject_name(name):
+    if not _SAFE_SUBJECT_NAME.match(name) or name in (".", ".."):
+        raise ValueError(
+            f"Subject name {name!r} is not safe to use in a catalog campaign's "
+            f"run-directory paths and DAG file (must match {_SAFE_SUBJECT_NAME.pattern!r} "
+            "and not be '.' or '..')"
+        )
+
+
 def _write_transit_search_job_script(rundir, config_path):
     """
     Write the job script that actually runs a single target's transit
@@ -55,13 +78,18 @@ def _write_transit_search_job_script(rundir, config_path):
     ``rundir``/``config_path`` they're pointed at.
     """
     job_script = os.path.join(rundir, "run_transit_search.sh")
+    results_path = os.path.join(rundir, "results.json")
     with open(job_script, "w") as f:
         f.write("#!/bin/bash\n")
         f.write("# BLS transit-search pipeline job\n")
         f.write("set -e\n")
-        f.write(f"echo 'Working directory: {rundir}'\n")
+        # shlex.quote, not a manually single-quoted f-string: rundir/results_path
+        # are echoed for log readability only, but a literal single quote in
+        # either path (unusual, but not impossible) would otherwise break the
+        # script's shell syntax outright.
+        f.write(f"echo {shlex.quote(f'Working directory: {rundir}')}\n")
         f.write(f"asimov-exoplanet-bls {shlex.quote(config_path)} {shlex.quote(rundir)}\n")
-        f.write(f"echo 'Transit search complete - {os.path.join(rundir, 'results.json')} created'\n")
+        f.write(f"echo {shlex.quote(f'Transit search complete - {results_path} created')}\n")
     os.chmod(job_script, 0o755)
     return job_script
 
@@ -205,14 +233,14 @@ class DummyTransitSearchPipeline(Pipeline):
             f.write("#!/bin/bash\n")
             f.write("# Dummy transit-search pipeline job\n")
             f.write("set -e\n")
-            f.write(f"echo 'Working directory: {rundir}'\n")
+            f.write(f"echo {shlex.quote(f'Working directory: {rundir}')}\n")
             f.write(
                 "python3 -c \"import json; "
                 "json.dump({'period': 1.0, 'epoch': 0.0, 'duration': 0.1, "
                 "'depth': 0.001, 'sde': 10.0, 'vetting_flags': []}, "
                 f"open('{results_file}', 'w'))\"\n"
             )
-            f.write(f"echo 'Dummy transit search complete - {results_file} created'\n")
+            f.write(f"echo {shlex.quote(f'Dummy transit search complete - {results_file} created')}\n")
         os.chmod(job_script, 0o755)
 
         _write_submission_files(
@@ -504,6 +532,7 @@ class BLSTransitSearch(Pipeline):
         dag_lines = []
         job_labels = []
         for subject in subjects:
+            _validate_subject_name(subject.name)
             subject_rundir = os.path.join(rundir, subject.name)
             _ensure_rundir(subject_rundir)
 

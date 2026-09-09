@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 from asimov.scheduler import Slurm
 
-from asimov_exoplanet.pipeline import BLSTransitSearch, DummyTransitSearchPipeline
+from asimov_exoplanet.pipeline import BLSTransitSearch, DummyTransitSearchPipeline, _validate_subject_name
 
 
 class FakeEvent:
@@ -611,6 +611,72 @@ class BLSTransitSearchCatalogDagTests(unittest.TestCase):
             submitted_scripts,
             [os.path.join(name, "sbatch_submit.sh") for name in ["KIC-1", "KIC-2", "KIC-3"]],
         )
+
+    def test_build_dag_rejects_a_subject_name_that_would_escape_the_run_directory(self):
+        """
+        Regression test (Copilot review finding on PR #4): subject names
+        come from blueprint metadata, and asimov core places no restriction
+        on them -- an event blueprint with ``name: '../evil'`` applies
+        without complaint (confirmed directly against a real ledger while
+        fixing this). Before this fix, ``_build_catalog_dag`` used
+        ``subject.name`` directly in ``os.path.join(rundir, subject.name)``,
+        so such a name would write the target's job files outside the
+        campaign run directory entirely, and could also corrupt
+        ``transit_search.dag`` (a line-based, whitespace-delimited format)
+        if the name contained whitespace. ``_validate_subject_name`` now
+        rejects anything outside a conservative safe set before any path or
+        DAG line is built from it.
+        """
+        from asimov.cli.application import apply_page
+
+        blueprint = os.path.join(self.test_dir, "evil.yaml")
+        with open(blueprint, "w") as f:
+            f.write(
+                "kind: event\n"
+                "name: '../evil'\n"
+                "photometry:\n"
+                "  mission: Kepler\n"
+                "  catalog id: 99\n"
+            )
+        apply_page(file=blueprint, event=None, ledger=self.ledger)
+
+        from asimov.analysis import ProjectAnalysis
+
+        analysis = ProjectAnalysis(
+            subjects=["../evil"],
+            name="catalog-transit-search",
+            pipeline="photometry-bls",
+            status="ready",
+            ledger=self.ledger,
+            rundir=self.rundir,
+        )
+
+        with self.assertRaisesRegex(ValueError, "not safe to use in a catalog campaign"):
+            analysis.pipeline.build_dag()
+
+        # Confirm the run directory itself stays empty -- no per-subject
+        # directory was written for the malicious name before validation
+        # caught it.
+        self.assertEqual(os.listdir(self.rundir), [])
+
+
+class SubjectNameValidationTests(unittest.TestCase):
+    """Unit-level coverage for ``_validate_subject_name`` -- see the
+    regression test above for the end-to-end ``build_dag`` behaviour."""
+
+    def test_accepts_real_catalog_identifiers(self):
+        for name in ["KIC-11446443", "TIC-12345", "Kepler-10", "epic_201367065", "target.1"]:
+            _validate_subject_name(name)  # must not raise
+
+    def test_rejects_path_traversal_and_separators(self):
+        for name in ["..", ".", "../evil", "a/b", "a\\b", "/etc/passwd"]:
+            with self.assertRaises(ValueError):
+                _validate_subject_name(name)
+
+    def test_rejects_whitespace_and_newlines(self):
+        for name in ["KIC 1", "KIC-1\n", "KIC-1\tTAB", "line1\nline2"]:
+            with self.assertRaises(ValueError):
+                _validate_subject_name(name)
 
 
 if __name__ == "__main__":
